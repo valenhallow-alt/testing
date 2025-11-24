@@ -1,0 +1,1642 @@
+-- clean_macro_template_with_wave.lua
+-- Macro engine + Rayfield UI wiring, with robust wave reader and robust persistence merge.
+
+-- Rayfield loader
+local okRay, Rayfield = pcall(function()
+    return loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+end)
+if not okRay or not Rayfield then
+    warn("Rayfield failed to load; UI will not be created.")
+    Rayfield = nil
+end
+
+-- Services
+local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer = Players.LocalPlayer
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+
+-- Timing/config
+local CHECK_DELAY = 0.05
+local PERSIST_DELAY = 0.5
+local DEBOUNCE_SEC = 0.5
+local LOG = false
+local DEBUG = false
+
+-- Persistence file name
+local MACROS_FILE = "CleanMacroTemplate_macros.json"
+
+-- Placement tunables
+local PLACE_PROXIMITY = 4
+local PLACE_ATTEMPT_TIMEOUT = 8
+local PLACE_POLL = 0.25
+local PLACE_OVERALL_MAX = 120
+local PLACEMENT_CLEARANCE = 1.2
+local SPIRAL_OFFSETS = {0, 1, -1, 2, -2, 3, -3}
+local SPIRAL_STEP = 1.0
+local SPIRAL_RINGS = 5
+
+-- Macro runtime defaults
+local MacroState = {
+    Recording = false,
+    Playing = false,
+    Steps = {},
+    CurrentMacroName = nil,
+    Macros = {},
+    AutoMission = { Enabled = false, Assigned = {}, Playing = false },
+    _playedThisMission = false,
+    _lastWave = nil,
+    _playSession = nil,
+    AutoRetry = false,
+    AutoX2 = false,
+    AutoUpgrade = false,
+    AutoStart = false,
+    AutoNext = false,
+    _autoRetryThread = nil,
+    _autoUpgradeThread = nil,
+    _autoStartThread = nil,
+    _autoX2Thread = nil,
+    _autoNextThread = nil,
+    _x2FiredThisMission = false,
+    _startFiredThisMission = false,
+    _autoMapsThread = nil,
+    AutoMapMacro = false,
+    SelectedNight = nil,
+    SelectedLevel = nil,
+    SelectedDifficulty = nil,
+    AutoMapsEnabled = false
+}
+
+-- JSON helpers
+local function safeJSONEncode(x)
+    local ok, res = pcall(HttpService.JSONEncode, HttpService, x)
+    return ok and res or "{}"
+end
+local function safeJSONDecode(s)
+    local ok, res = pcall(HttpService.JSONDecode, HttpService, s)
+    return ok and res or {}
+end
+
+-- Misc helpers
+local function normalize(s) return tostring(s or ""):gsub("%W", ""):lower() end
+
+-- CFrame helpers
+local function cframeToTable(cf)
+    if typeof(cf) ~= "CFrame" then return nil end
+    local px,py,pz = cf.X, cf.Y, cf.Z
+    local lv,uv = cf.LookVector, cf.UpVector
+    return {px,py,pz, lv.X,lv.Y,lv.Z, uv.X,uv.Y,uv.Z}
+end
+local function tableToCFrame(t)
+    if type(t) ~= "table" then return nil end
+    local px,py,pz = t[1],t[2],t[3]
+    if not (px and py and pz) then return nil end
+    local look = Vector3.new(t[4] or 0, t[5] or 0, t[6] or 0)
+    local up = Vector3.new(t[7] or 0, t[8] or 1, t[9] or 0)
+    local ok, cf = pcall(function()
+        local z = -look
+        local y = up
+        local x = y:Cross(z)
+        if x.magnitude == 0 then return CFrame.new(px,py,pz) end
+        x = x.Unit; y = z:Cross(x)
+        return CFrame.new(px,py,pz, x.X, y.X, z.X, x.Y, y.Y, z.Y, x.Z, y.Z, z.Z)
+    end)
+    if ok and cf then return cf end
+    return CFrame.new(px,py,pz)
+end
+
+local function setCFrameY(cf, newY)
+    if typeof(cf) ~= "CFrame" then return cf end
+    local px, pz = cf.X, cf.Z
+    local look = cf.LookVector
+    local up = cf.UpVector
+    local z = -look
+    local y = up
+    local x = y:Cross(z)
+    if x.magnitude == 0 then return CFrame.new(px, newY, pz) end
+    x = x.Unit; y = z:Cross(x)
+    return CFrame.new(px, newY, pz, x.X, y.X, z.X, x.Y, y.Y, z.Y, x.Z, y.Z, z.Z)
+end
+
+local function findFirstBasePart(obj)
+    if not obj then return nil end
+    if obj:IsA("BasePart") then return obj end
+    for _, d in ipairs(obj:GetDescendants()) do
+        if d:IsA("BasePart") then return d end
+    end
+    return nil
+end
+
+-- Placement helpers
+local function getPlaceUnitRemote()
+    local ok, netRoot = pcall(function()
+        return ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Packages")
+            :WaitForChild("_Index"):WaitForChild("sleitnick_net@0.2.0"):WaitForChild("net")
+    end)
+    if not ok or not netRoot then
+        if LOG then warn("Could not find sleitnick net root") end
+        return nil
+    end
+    local remote = netRoot:FindFirstChild("RE/PlaceUnit") or netRoot:FindFirstChild("PlaceUnit")
+    if not remote then
+        local re = netRoot:FindFirstChild("RE")
+        if re then remote = re:FindFirstChild("PlaceUnit") end
+    end
+    if not remote and LOG then warn("PlaceUnit remote not found") end
+    return remote
+end
+
+local function listUnitHitboxBaseParts()
+    local root = workspace:FindFirstChild("UnitHitboxes")
+    if not root then return {} end
+    local parts = {}
+    for _, child in ipairs(root:GetChildren()) do
+        if child:IsA("BasePart") then
+            table.insert(parts, child)
+        else
+            for _, d in ipairs(child:GetDescendants()) do
+                if d:IsA("BasePart") then table.insert(parts, d); break end
+            end
+        end
+    end
+    return parts
+end
+
+local function snapshotHitboxKeys()
+    local keys = {}
+    for _, p in ipairs(listUnitHitboxBaseParts()) do keys[tostring(p)] = true end
+    return keys
+end
+
+local function findUnseenHitboxNear(pos, seenSet, radius)
+    radius = radius or PLACE_PROXIMITY
+    for _, p in ipairs(listUnitHitboxBaseParts()) do
+        if p and p.Position then
+            local key = tostring(p)
+            if not seenSet[key] and (p.Position - pos).Magnitude <= radius then
+                seenSet[key] = true
+                return p, key
+            end
+        end
+    end
+    return nil, nil
+end
+
+local function findGroundYForXZ(origCFrame, maxDown)
+    maxDown = maxDown or 300
+    local origin = Vector3.new(origCFrame.X, origCFrame.Y + 6, origCFrame.Z)
+    local direction = Vector3.new(0, -maxDown, 0)
+    local rp = RaycastParams.new()
+    rp.FilterType = Enum.RaycastFilterType.Blacklist
+    local ignoreList = {}
+    if LocalPlayer and LocalPlayer.Character then table.insert(ignoreList, LocalPlayer.Character) end
+    rp.FilterDescendantsInstances = ignoreList
+    local res = workspace:Raycast(origin, direction, rp)
+    if res and res.Position then return res.Position.Y + 0.5 end
+    return origCFrame.Y
+end
+
+local function candidateOverlapsExisting(pos, clearance)
+    clearance = clearance or PLACEMENT_CLEARANCE
+    for _, p in ipairs(listUnitHitboxBaseParts()) do
+        if p and p.Position and (p.Position - pos).Magnitude <= clearance then return true end
+    end
+    return false
+end
+
+local function findSafePlacementCFrame(recordedCf)
+    if typeof(recordedCf) ~= "CFrame" then return recordedCf end
+    local baseY = findGroundYForXZ(recordedCf, 400)
+    local candidate = setCFrameY(recordedCf, baseY)
+    if not candidateOverlapsExisting(candidate.Position) then return candidate end
+    for ring = 1, SPIRAL_RINGS do
+        for _, ox in ipairs(SPIRAL_OFFSETS) do
+            for _, oz in ipairs(SPIRAL_OFFSETS) do
+                local dx = ox * SPIRAL_STEP * ring
+                local dz = oz * SPIRAL_STEP * ring
+                if dx ~= 0 or dz ~= 0 then
+                    local tryX = recordedCf.X + dx
+                    local tryZ = recordedCf.Z + dz
+                    local tryOrigin = Vector3.new(tryX, recordedCf.Y + 6 + ring, tryZ)
+                    local rp = RaycastParams.new()
+                    rp.FilterType = Enum.RaycastFilterType.Blacklist
+                    local ignoreList = {}
+                    if LocalPlayer and LocalPlayer.Character then table.insert(ignoreList, LocalPlayer.Character) end
+                    rp.FilterDescendantsInstances = ignoreList
+                    local res = workspace:Raycast(tryOrigin, Vector3.new(0, -400, 0), rp)
+                    local tryY = (res and (res.Position.Y + 0.5)) or recordedCf.Y
+                    local tryCf = setCFrameY(recordedCf, tryY)
+                    local rx, ry, rz = tryCf:ToEulerAnglesXYZ()
+                    tryCf = CFrame.new(tryX, tryY, tryZ) * CFrame.fromEulerAnglesXYZ(rx, ry, rz)
+                    if not candidateOverlapsExisting(tryCf.Position) then return tryCf end
+                end
+            end
+        end
+    end
+    return candidate
+end
+
+local function waitForNewHitboxNear(pos, seenSet, timeout)
+    timeout = tonumber(timeout) or PLACE_ATTEMPT_TIMEOUT
+    local root = workspace:FindFirstChild("UnitHitboxes")
+    local finishAt = tick() + timeout
+    local part, key = findUnseenHitboxNear(pos, seenSet, PLACE_PROXIMITY)
+    if part then return part, key end
+    local got = nil
+    local conn
+    if root then
+        conn = root.ChildAdded:Connect(function(child)
+            local bp = nil
+            if child:IsA("BasePart") then bp = child
+            else
+                for _, d in ipairs(child:GetDescendants()) do
+                    if d:IsA("BasePart") then bp = d; break end
+                end
+            end
+            if bp and not got then
+                if (bp.Position - pos).Magnitude <= PLACE_PROXIMITY and not seenSet[tostring(bp)] then
+                    seenSet[tostring(bp)] = true
+                    got = bp
+                end
+            end
+        end)
+    end
+    while tick() < finishAt and MacroState.Playing do
+        if got then if conn then conn:Disconnect() end; return got, tostring(got) end
+        local p2,k2 = findUnseenHitboxNear(pos, seenSet, PLACE_PROXIMITY)
+        if p2 then if conn then conn:Disconnect() end; return p2,k2 end
+        task.wait(PLACE_POLL)
+        local w = (function()
+            if type(getCurrentWave) == "function" then return getCurrentWave() end
+            return nil
+        end)()
+        if w == 1 and MacroState._playedThisMission then
+            if conn then conn:Disconnect() end
+            return nil, "mission_restart"
+        end
+    end
+    if conn then conn:Disconnect() end
+    return nil, "timeout"
+end
+
+-- Robust Wave Reader integration
+local WAVE_PATH = {"GameHUDMain", "Top", "Wave"}
+local PLAYER_GUI_TIMEOUT = 5
+local _wave_currentWidget, _wave_widgetConn, _wave_childConn, _wave_lastRaw, _wave_lastParsed = nil, nil, nil, nil, nil
+
+local function stripHtmlRobust(s) if type(s) ~= "string" then return "" end return (s:gsub("<[^>]+>", "")) end
+local function extractNumberFromString(s)
+    if type(s) ~= "string" then return nil end
+    local cleaned = stripHtmlRobust(s)
+    local digits = cleaned:match("%d+")
+    if digits then return tonumber(digits) end
+    return nil
+end
+
+local function readWidgetText(widget)
+    if not widget then return nil end
+    if widget:IsA("TextLabel") or widget:IsA("TextButton") or widget:IsA("TextBox") then
+        local ok, v = pcall(function() return widget.Text end)
+        if ok and v and v ~= "" then return v end
+    end
+    local okP, pval = pcall(function() return widget.ContentText end)
+    if okP and pval and pval ~= "" then return pval end
+    if type(widget.GetAttribute) == "function" then
+        local okA, aval = pcall(function() return widget:GetAttribute("ContentText") end)
+        if okA and aval and aval ~= "" then return aval end
+    end
+    local child = widget:FindFirstChild("ContentText")
+    if child and (child:IsA("TextLabel") or child:IsA("TextBox") or child:IsA("TextButton")) then
+        local okC, c = pcall(function() return child.Text end)
+        if okC and c and c ~= "" then return c end
+    end
+    return nil
+end
+
+local function findWaveWidget()
+    local pg = LocalPlayer:FindFirstChild("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", PLAYER_GUI_TIMEOUT)
+    if not pg then return nil end
+    local current = pg
+    for _, name in ipairs(WAVE_PATH) do
+        current = current:FindFirstChild(name)
+        if not current then return nil end
+    end
+    return current
+end
+
+local function unbindWaveWidget()
+    if _wave_widgetConn then pcall(function() _wave_widgetConn:Disconnect() end) end
+    if _wave_childConn then pcall(function() _wave_childConn:Disconnect() end) end
+    _wave_widgetConn = nil; _wave_childConn = nil; _wave_currentWidget = nil
+end
+
+local function printWaveBindingInfo(raw, parsed)
+    if DEBUG or LOG then print("Wave raw:", tostring(raw), "=> parsed:", tostring(parsed)) end
+end
+
+local function onWaveWidgetChanged(prop)
+    if prop == "Text" or prop == "ContentText" then
+        local raw = readWidgetText(_wave_currentWidget)
+        local parsed = extractNumberFromString(raw or "")
+        _wave_lastRaw = raw; _wave_lastParsed = parsed
+        printWaveBindingInfo(raw, parsed)
+    end
+end
+
+local function bindWaveWidget(widget)
+    unbindWaveWidget()
+    if not widget then return end
+    _wave_currentWidget = widget
+    local raw = readWidgetText(widget)
+    local parsed = extractNumberFromString(raw or "")
+    _wave_lastRaw = raw; _wave_lastParsed = parsed
+    printWaveBindingInfo(raw, parsed)
+    if widget.Changed then
+        _wave_widgetConn = widget.Changed:Connect(function(prop) pcall(onWaveWidgetChanged, prop) end)
+    end
+    local ct = widget:FindFirstChild("ContentText")
+    if ct and ct.Changed then
+        _wave_childConn = ct.Changed:Connect(function(prop)
+            if prop == "Text" then
+                local raw2 = readWidgetText(widget)
+                local parsed2 = extractNumberFromString(raw2 or "")
+                _wave_lastRaw = raw2; _wave_lastParsed = parsed2
+                printWaveBindingInfo(raw2, parsed2)
+            end
+        end)
+    end
+end
+
+local function rebindWave()
+    local w = findWaveWidget()
+    if w then
+        if _wave_currentWidget ~= w then
+            bindWaveWidget(w)
+            if typeof(w.GetFullName) == "function" then
+                if DEBUG or LOG then print("Bound wave widget:", w:GetFullName()) end
+            else
+                if DEBUG or LOG then print("Bound wave widget:", tostring(w)) end
+            end
+        end
+    else
+        if _wave_currentWidget then unbindWaveWidget() end
+        if DEBUG or LOG then warn("Wave widget not found at path: " .. table.concat(WAVE_PATH, ".")) end
+    end
+end
+
+do
+    local pg = LocalPlayer:FindFirstChild("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", PLAYER_GUI_TIMEOUT)
+    if pg then
+        rebindWave()
+        pg.ChildAdded:Connect(function() task.delay(0.08, rebindWave) end)
+        pg.ChildRemoved:Connect(function() task.delay(0.08, rebindWave) end)
+    else
+        if DEBUG or LOG then warn("PlayerGui not available; wave reader cannot bind") end
+    end
+end
+
+function getCurrentWave()
+    if _wave_lastParsed ~= nil then return _wave_lastParsed end
+    local widget = findWaveWidget()
+    if not widget then return nil end
+    local raw = readWidgetText(widget)
+    local parsed = extractNumberFromString(raw or "")
+    _wave_lastRaw = raw; _wave_lastParsed = parsed
+    return parsed
+end
+
+-- Debug helpers
+local function describeStep(step)
+    if type(step) ~= "table" then return "<invalid step>" end
+    local stype = tostring(step.type or "?")
+    if stype == "place" and step.data and step.data.cframe then
+        local cf = tableToCFrame(step.data.cframe)
+        if cf then return ("place UnitGUID=%s pos=%.2f,%.2f,%.2f"):format(tostring(step.data.UnitGUID or step.data.tmplId or "nil"), cf.X, cf.Y, cf.Z) end
+        return ("place UnitGUID=%s"):format(tostring(step.data.UnitGUID or "nil"))
+    elseif stype == "wait" then return ("wait dur=%.2f"):format(tonumber(step.data and step.data.duration) or 0)
+    elseif stype == "action" then
+        local argsCount = (step.data and step.data.args and type(step.data.args) == "table") and #step.data.args or 0
+        return ("action name=%s args=%d"):format(tostring(step.data and step.data.name or "nil"), argsCount)
+    else return ("step type=%s"):format(stype) end
+end
+
+local function dumpSteps(steps, prefix)
+    if not DEBUG then return end
+    prefix = prefix or ""
+    if type(steps) ~= "table" then print(prefix .. "No steps to dump"); return end
+    print(prefix .. "Recorded steps count = " .. tostring(#steps))
+    for i, s in ipairs(steps) do print(prefix .. ("[%02d] %s"):format(i, describeStep(s))) end
+end
+
+-- Placement logic (placeStepWithRetry)
+local function getCFrameFromHitbox(hitbox)
+    if not hitbox then return nil end
+    if hitbox:IsA("BasePart") then return hitbox.CFrame end
+    if hitbox:IsA("Model") then
+        if hitbox.PrimaryPart and hitbox.PrimaryPart:IsA("BasePart") then return hitbox.PrimaryPart.CFrame end
+        for _, d in ipairs(hitbox:GetDescendants()) do if d:IsA("BasePart") then return d.CFrame end end
+    end
+    return nil
+end
+
+local function placeStepWithRetry(step)
+    if type(step) ~= "table" or step.type ~= "place" then return false end
+    local data = step.data or {}
+    local recordedCf = tableToCFrame(data.cframe)
+    if not recordedCf then return false end
+    local remote = getPlaceUnitRemote()
+    if not remote then return false end
+    local seen = snapshotHitboxKeys()
+    local existing = findUnseenHitboxNear(recordedCf.Position, seen, PLACE_PROXIMITY)
+    if existing then if LOG then print("placeStepWithRetry: already present; skipping") end; return true end
+    local overallStart = tick()
+    while MacroState.Playing do
+        local w = getCurrentWave()
+        if w == 1 and MacroState._playedThisMission then if LOG then print("placeStepWithRetry: mission restart detected, aborting") end; return false end
+        local candidateCf = findSafePlacementCFrame(recordedCf)
+        local args = { { PlaceCFrame = candidateCf, UnitGUID = data.UnitGUID } }
+        pcall(function()
+            if typeof(remote.FireServer) == "function" then remote:FireServer(unpack(args)) else remote(unpack(args)) end
+        end)
+        if LOG or DEBUG then print("placeStepWithRetry: fired PlaceUnit at", candidateCf.Position) end
+        local part, reason = waitForNewHitboxNear(candidateCf.Position, seen, PLACE_ATTEMPT_TIMEOUT)
+        if part then task.wait(0.1); return true
+        elseif reason == "mission_restart" then return false
+        elseif reason == "timeout" then
+            if LOG or DEBUG then print("placeStepWithRetry: attempt timed out; retrying later") end
+            if not MacroState.AutoRetry then return "retry" end
+            task.wait(0.25)
+        end
+        if tick() - overallStart > PLACE_OVERALL_MAX then if LOG then print("placeStepWithRetry: overall max retry exceeded") end; return "retry" end
+    end
+    return false
+end
+
+-- Playback core
+local function performStep(step)
+    if type(step) ~= "table" then return end
+    local stype = step.type
+    local data = step.data or {}
+    if stype == "wait" then
+        local dur = tonumber(data.duration) or 0
+        local t0 = tick()
+        while tick() - t0 < dur do if MacroState and MacroState.Playing == false then break end; task.wait(0.05) end
+    elseif stype == "action" then
+        local name = data.name; local args = data.args or {}
+        if LOG then print("performStep: action", name, unpack(args)) end
+    else
+        if LOG then print("performStep: unknown step type", stype) end
+    end
+end
+
+local function playMacroRepeatedly()
+    task.spawn(function()
+        local mySession = MacroState._playSession
+        MacroState._playedThisMission = false
+        MacroState._lastWave = MacroState._lastWave or getCurrentWave()
+        while MacroState.Playing and MacroState._playSession == mySession do
+            if MacroState._playedThisMission then
+                while MacroState.Playing and MacroState._playSession == mySession do
+                    local w = getCurrentWave()
+                    if w == 1 then
+                        if MacroState._lastWave ~= 1 then MacroState._lastWave = 1; MacroState._playedThisMission = false; break end
+                    else MacroState._lastWave = w end
+                    task.wait(0.5)
+                end
+                if not (MacroState.Playing and MacroState._playSession == mySession) then break end
+            end
+            local steps = MacroState.Steps or {}
+            if #steps == 0 then task.wait(0.5)
+            else
+                if DEBUG then dumpSteps(steps, ("[PlayAttempt '%s'] "):format(tostring(MacroState.CurrentMacroName or "unnamed"))) end
+                local succeeded = {}
+                local anyPlacedThisScan = false
+                for idx, s in ipairs(steps) do
+                    if not (MacroState.Playing and MacroState._playSession == mySession) then break end
+                    if s.type == "place" then
+                        if DEBUG then print(("[PlayAttempt] trying step %d: %s"):format(idx, describeStep(s))) end
+                        local cf = tableToCFrame(s.data and s.data.cframe)
+                        if not cf then succeeded[idx] = true; continue end
+                        local seen = snapshotHitboxKeys()
+                        local existingPart = findUnseenHitboxNear(cf.Position, seen, PLACE_PROXIMITY)
+                        if existingPart then succeeded[idx] = true
+                        else
+                            local res = placeStepWithRetry(s)
+                            if res == true then succeeded[idx] = true; anyPlacedThisScan = true
+                            elseif res == "retry" then task.wait(0.05)
+                            else break end
+                        end
+                    end
+                    task.wait(0.03)
+                end
+                for idx, s in ipairs(steps) do
+                    if not (MacroState.Playing and MacroState._playSession == mySession) then break end
+                    if s.type ~= "place" then performStep(s) end
+                    task.wait(0.03)
+                end
+                local allPlacesSatisfied = true
+                for i = 1, #steps do if steps[i].type == "place" and not succeeded[i] then allPlacesSatisfied = false; break end end
+                if allPlacesSatisfied then MacroState._playedThisMission = true else if anyPlacedThisScan then task.wait(0.5) else task.wait(1.0) end end
+            end
+            local lw = getCurrentWave()
+            if lw then MacroState._lastWave = lw end
+            local waitStart = tick()
+            while MacroState.Playing and MacroState._playSession == mySession and tick() - waitStart < 0.5 do task.wait(0.15) end
+        end
+        if MacroState._playSession == mySession then MacroState._playSession = nil; MacroState.Playing = false; MacroState.CurrentMacroName = nil end
+    end)
+end
+
+-- AutoMission worker
+local function autoMissionWorker()
+    task.spawn(function()
+        MacroState.AutoMission.Playing = true
+        while MacroState.AutoMission.Enabled do
+            for slot, assigned in pairs(MacroState.AutoMission.Assigned or {}) do
+                if not MacroState.AutoMission.Enabled then break end
+                if assigned and assigned ~= "" and MacroState.Macros[assigned] then
+                    local steps = MacroState.Macros[assigned] or {}
+                    if #steps > 0 then
+                        if DEBUG then dumpSteps(steps, ("[AutoSlot '%s'] "):format(slot)) end
+                        local succeeded = {}
+                        local anyPlaced = false
+                        for idx, s in ipairs(steps) do
+                            if not MacroState.AutoMission.Enabled then break end
+                            if s.type == "place" then
+                                local cf = tableToCFrame(s.data and s.data.cframe)
+                                if not cf then succeeded[idx] = true
+                                else
+                                    local seen = snapshotHitboxKeys()
+                                    local existing = findUnseenHitboxNear(cf.Position, seen, PLACE_PROXIMITY)
+                                    if existing then succeeded[idx] = true
+                                    else
+                                        local res = placeStepWithRetry(s)
+                                        if res == true then succeeded[idx] = true; anyPlaced = true
+                                        elseif res == "retry" then task.wait(0.05)
+                                        else break end
+                                    end
+                                end
+                            else performStep(s) end
+                            task.wait(0.03)
+                        end
+                        local all = true
+                        for i = 1, #steps do if steps[i].type == "place" and not succeeded[i] then all = false; break end end
+                        if all and DEBUG then print(("[AutoSlot] slot %s: all places satisfied"):format(slot)) end
+                    end
+                    while MacroState.AutoMission.Enabled do
+                        local w = getCurrentWave()
+                        if w == 1 then break end
+                        task.wait(0.5)
+                    end
+                end
+                local waitStart = tick()
+                while MacroState.AutoMission.Enabled and tick() - waitStart < 0.5 do task.wait(0.1) end
+            end
+            local waitStart = tick()
+            while MacroState.AutoMission.Enabled and tick() - waitStart < 1.0 do task.wait(0.2) end
+        end
+        MacroState.AutoMission.Playing = false
+    end)
+end
+
+-- Persistence helpers and robust merge persist/load
+local function canUseFileApi()
+    return type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function"
+end
+
+local persistScheduled = false
+local function persistMacrosImmediate()
+    if not canUseFileApi() then return false end
+    local payload = {
+        Macros = MacroState.Macros or {},
+        AutoMission = {
+            Assigned = (MacroState.AutoMission and MacroState.AutoMission.Assigned) or {},
+            Enabled = (MacroState.AutoMission and MacroState.AutoMission.Enabled) and true or false
+        },
+        AutoRetry = MacroState.AutoRetry and true or false,
+        AutoX2 = MacroState.AutoX2 and true or false,
+        AutoUpgrade = MacroState.AutoUpgrade and true or false,
+        AutoStart = MacroState.AutoStart and true or false,
+        AutoNext = MacroState.AutoNext and true or false,
+        AutoMapMacro = MacroState.AutoMapMacro and true or false,
+        AutoMapsEnabled = MacroState.AutoMapsEnabled and true or false,
+        SelectedNight = MacroState.SelectedNight,
+        SelectedLevel = MacroState.SelectedLevel,
+        SelectedDifficulty = MacroState.SelectedDifficulty
+    }
+    local ok, err = pcall(function() writefile(MACROS_FILE, safeJSONEncode(payload)) end)
+    if not ok and LOG then warn("persistMacrosImmediate error", err) end
+    return ok
+end
+
+local function schedulePersist()
+    if not canUseFileApi() then return end
+    if persistScheduled then return end
+    persistScheduled = true
+    task.spawn(function() task.wait(PERSIST_DELAY); persistScheduled = false; pcall(persistMacrosImmediate) end)
+end
+
+local function loadMacrosFromDisk()
+    if not canUseFileApi() then if LOG then warn("Persistence unavailable") end; return end
+    local ok, content = pcall(function() if isfile(MACROS_FILE) then return readfile(MACROS_FILE) end; return nil end)
+    if not ok or not content then return end
+    local parsed = safeJSONDecode(content)
+    if type(parsed) ~= "table" then return end
+
+    -- Merge Macros
+    if type(parsed.Macros) == "table" then
+        MacroState.Macros = MacroState.Macros or {}
+        for k,v in pairs(parsed.Macros) do MacroState.Macros[k] = v end
+    end
+
+    -- Merge AutoMission
+    MacroState.AutoMission = MacroState.AutoMission or { Enabled = false, Assigned = {}, Playing = false }
+    if type(parsed.AutoMission) == "table" then
+        if type(parsed.AutoMission.Assigned) == "table" then
+            MacroState.AutoMission.Assigned = parsed.AutoMission.Assigned
+        end
+        if parsed.AutoMission.Enabled ~= nil then
+            MacroState.AutoMission.Enabled = parsed.AutoMission.Enabled and true or false
+        end
+    end
+
+    -- Simple booleans
+    if parsed.AutoRetry ~= nil then MacroState.AutoRetry = parsed.AutoRetry and true or false end
+    if parsed.AutoX2 ~= nil then MacroState.AutoX2 = parsed.AutoX2 and true or false end
+    if parsed.AutoUpgrade ~= nil then MacroState.AutoUpgrade = parsed.AutoUpgrade and true or false end
+    if parsed.AutoStart ~= nil then MacroState.AutoStart = parsed.AutoStart and true or false end
+    if parsed.AutoNext ~= nil then MacroState.AutoNext = parsed.AutoNext and true or false end
+    if parsed.AutoMapMacro ~= nil then MacroState.AutoMapMacro = parsed.AutoMapMacro and true or false end
+    if parsed.AutoMapsEnabled ~= nil then MacroState.AutoMapsEnabled = parsed.AutoMapsEnabled and true or false end
+
+    -- Selected values
+    if parsed.SelectedNight ~= nil then MacroState.SelectedNight = parsed.SelectedNight end
+    if parsed.SelectedLevel ~= nil then MacroState.SelectedLevel = parsed.SelectedLevel end
+    if parsed.SelectedDifficulty ~= nil then MacroState.SelectedDifficulty = parsed.SelectedDifficulty end
+end
+
+-- API surface
+local MacroAPI = {}
+local recordConnections = {}
+local recordedHitboxIds = {}
+local function clearRecordConnections()
+    for _, c in ipairs(recordConnections) do pcall(function() c:Disconnect() end) end
+    recordConnections = {}; recordedHitboxIds = {}
+end
+
+local function buildNameToGUID()
+    local map = {}
+    for i = 1, 6 do
+        local ok, val = pcall(function() return LocalPlayer:GetAttribute(tostring(i)) end)
+        if ok and val and val ~= "" then
+            local guid = tostring(val):match("{[^}]+}")
+            local name = tostring(val):gsub("{[^}]+}%s*", "")
+            if guid and name and name ~= "" then map[normalize(name)] = guid; if LOG then print("buildNameToGUID:", i, guid, name) end end
+        end
+    end
+    return map
+end
+
+local function processPlacement(hitboxObj, optionalCharModel)
+    if not MacroState.Recording then return end
+    if not hitboxObj or not hitboxObj.Name then return end
+    local id = hitboxObj.Name
+    if recordedHitboxIds[id] then return end
+    local chars = workspace:FindFirstChild("Characters")
+    local charModel = optionalCharModel or (chars and chars:FindFirstChild(id))
+    if not charModel then task.wait(0.08); charModel = chars and chars:FindFirstChild(id); if not charModel then return end end
+    local nameToGUID = buildNameToGUID()
+    if not next(nameToGUID) then if LOG then print("processPlacement: no equipped names") end; return end
+    for _, desc in ipairs(charModel:GetDescendants()) do
+        if desc and desc.Name and type(desc.Name) == "string" then
+            local dnorm = normalize(desc.Name)
+            for normName, guid in pairs(nameToGUID) do
+                if dnorm:find(normName) or normName:find(dnorm) then
+                    local rawCFrame = getCFrameFromHitbox(hitboxObj)
+                    if rawCFrame then
+                        local adjusted = adjustCFrameToGround(rawCFrame, hitboxObj, { rayDownDist = 300, groundOffset = 0.5, startOffset = 2 })
+                        local step = { type = "place", data = { UnitGUID = guid, cframe = cframeToTable(adjusted) } }
+                        table.insert(MacroState.Steps, step)
+                        recordedHitboxIds[id] = true
+                        if LOG then print("Recorded placement:", guid, "id:", id, "Y:", adjusted.Y) end
+                        return
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- Minimal adjustCFrameToGround implementation (safe)
+function adjustCFrameToGround(cf, hitboxObj, opts)
+    opts = opts or {}
+    local rayDownDist = opts.rayDownDist or 200
+    local groundOffset = opts.groundOffset or 0.5
+    local startOffset = opts.startOffset or 2
+    if typeof(cf) ~= "CFrame" then return cf end
+    local rp = RaycastParams.new()
+    rp.FilterType = Enum.RaycastFilterType.Blacklist
+    local ignoreList = {}
+    if hitboxObj then table.insert(ignoreList, hitboxObj) end
+    if LocalPlayer and LocalPlayer.Character then table.insert(ignoreList, LocalPlayer.Character) end
+    rp.FilterDescendantsInstances = ignoreList
+    local origin = cf.Position + Vector3.new(0, startOffset, 0)
+    local res = workspace:Raycast(origin, Vector3.new(0, -rayDownDist, 0), rp)
+    if res and res.Position then return setCFrameY(cf, res.Position.Y + groundOffset) end
+    return cf
+end
+
+function MacroAPI.StartRecording(name)
+    MacroState.Recording = true; MacroState.Steps = {}
+    if name and name ~= "" then MacroState.CurrentMacroName = tostring(name) end
+    clearRecordConnections()
+    local hitboxes = workspace:FindFirstChild("UnitHitboxes")
+    if hitboxes then table.insert(recordConnections, hitboxes.ChildAdded:Connect(function(child) task.wait(0.06); pcall(function() processPlacement(child) end) end)) end
+    local chars = workspace:FindFirstChild("Characters")
+    if chars then table.insert(recordConnections, chars.ChildAdded:Connect(function(child) local hb = workspace:FindFirstChild("UnitHitboxes") if hb and hb:FindFirstChild(child.Name) then task.wait(0.04); pcall(function() processPlacement(hb:FindFirstChild(child.Name), child) end) end end)) end
+    for i = 1, 6 do local attrName = tostring(i); local ok, signal = pcall(function() return LocalPlayer:GetAttributeChangedSignal(attrName) end); if ok and signal then table.insert(recordConnections, signal:Connect(function() if LOG then print("Attribute changed:", attrName) end end)) end end
+end
+
+function MacroAPI.StopRecordingAndSave(name)
+    MacroState.Recording = false
+    local mname = name or MacroState.CurrentMacroName
+    if not mname or mname == "" then mname = "macro_" .. tostring(os.time()) end
+    MacroState.CurrentMacroName = mname; MacroState.Macros[mname] = MacroState.Steps
+    if DEBUG then dumpSteps(MacroState.Steps, ("[Saved '%s'] "):format(mname)) end
+    clearRecordConnections(); schedulePersist()
+    return mname
+end
+
+function MacroAPI.GetMacroNames()
+    local keys = {}
+    for k,_ in pairs(MacroState.Macros) do if k and k ~= "" then table.insert(keys, k) end end
+    table.sort(keys); return keys
+end
+
+function MacroAPI.GetMacroSteps(name) if not name then return {} end; return MacroState.Macros[name] or {} end
+
+function MacroAPI.DeleteMacro(name)
+    if not name then return false end
+    if MacroState.Playing and MacroState.CurrentMacroName == name then MacroState._playSession = nil; MacroState.Playing = false end
+    MacroState.Macros[name] = nil
+    for k,v in pairs(MacroState.AutoMission.Assigned or {}) do if v == name then MacroState.AutoMission.Assigned[k] = nil end end
+    MacroState.CurrentMacroName = nil; MacroState.Steps = {}
+    schedulePersist(); return true
+end
+
+function MacroAPI.PlayMacroByName(name)
+    if not name then return false end
+    MacroState.Steps = MacroState.Macros[name] or {}
+    MacroState.CurrentMacroName = name
+    MacroState._playSession = {}
+    MacroState.Playing = true
+    if DEBUG or LOG then print("[MacroAPI] PlayMacroByName:", name) end
+    playMacroRepeatedly()
+    return true
+end
+
+function MacroAPI.StopPlaying()
+    MacroState._playSession = nil; MacroState.Playing = false; MacroState.CurrentMacroName = nil
+    if DEBUG or LOG then print("MacroAPI.StopPlaying called") end
+end
+
+function MacroAPI.AssignMacroToSlot(slotName, macroName)
+    if not slotName or not macroName then return false end
+    MacroState.AutoMission.Assigned[slotName] = macroName; schedulePersist(); return true
+end
+
+function MacroAPI.SetAutoMissionEnabled(enabled)
+    MacroState.AutoMission.Enabled = enabled and true or false
+    if enabled then task.spawn(autoMissionWorker) else MacroState.AutoMission.Playing = false end
+    schedulePersist()
+end
+
+function MacroAPI.ExportMacroToJSON(name) local steps = MacroState.Macros[name] or {}; return safeJSONEncode(steps) end
+
+function MacroAPI.ImportMacroFromJSON(name, json)
+    if not name or name == "" then name = "imported_" .. tostring(os.time()) end
+    local parsed = safeJSONDecode(tostring(json or "[]"))
+    if type(parsed) ~= "table" then return false end
+    MacroState.Macros[name] = parsed; schedulePersist(); return true
+end
+
+function MacroAPI.GetMacroState() return MacroState end
+
+_G.MacroEngineAPI = _G.MacroEngineAPI or {}
+_G.MacroEngineAPI.API = MacroAPI
+
+-- Load persisted state early and merge safely
+pcall(loadMacrosFromDisk)
+
+-- Ensure shapes and booleans are set and start any required workers BEFORE UI creation
+MacroState.Macros = MacroState.Macros or {}
+MacroState.AutoMission = MacroState.AutoMission or { Enabled = false, Assigned = {}, Playing = false }
+MacroState.AutoRetry = MacroState.AutoRetry and true or false
+MacroState.AutoX2 = MacroState.AutoX2 and true or false
+MacroState.AutoUpgrade = MacroState.AutoUpgrade and true or false
+MacroState.AutoStart = MacroState.AutoStart and true or false
+MacroState.AutoNext = MacroState.AutoNext and true or false
+MacroState.AutoMapMacro = MacroState.AutoMapMacro and true or false
+MacroState.AutoMapsEnabled = MacroState.AutoMapsEnabled and true or false
+
+pcall(function()
+    if MacroState.AutoRetry then pcall(startAutoRetryWorker) end
+    if MacroState.AutoX2 then pcall(startAutoX2Worker) end
+    if MacroState.AutoUpgrade then pcall(startAutoUpgradeWorker) end
+    if MacroState.AutoStart then pcall(startAutoStartWorker) end
+    if MacroState.AutoNext then pcall(startAutoNextWorker) end
+    if MacroState.AutoMapsEnabled then pcall(startAutoMapsWorker) end
+end)
+
+-- Standalone recording GUI
+local function createStandaloneRecordingGui()
+    if RecordingGuiHandle and type(RecordingGuiHandle) == "table" and RecordingGuiHandle.SetVisible then return RecordingGuiHandle end
+    local existingGui = LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("MacroRecordingGui")
+    if existingGui and existingGui:IsA("ScreenGui") then
+        local frame = existingGui:FindFirstChild("RecordingFrame"); local dot = frame and frame:FindFirstChild("Dot"); local label = frame and frame:FindFirstChild("RecordingLabel")
+        local function setVisible(vis) pcall(function() if frame then frame.Visible = vis end; if dot then dot.Visible = vis end; if label then label.Visible = vis end end) end
+        return { Gui = existingGui, SetVisible = setVisible, Root = frame, Label = label, Dot = dot }
+    end
+    local PlayerGui = LocalPlayer:FindFirstChild("PlayerGui") or Instance.new("PlayerGui", LocalPlayer)
+    PlayerGui.Name = PlayerGui.Name
+    local gui = Instance.new("ScreenGui"); gui.Name = "MacroRecordingGui"; gui.ResetOnSpawn = false; gui.Parent = PlayerGui
+    local frame = Instance.new("Frame"); frame.Name = "RecordingFrame"; frame.Size = UDim2.new(0,160,0,40); frame.Position = UDim2.new(0.01,0,0.01,0)
+    frame.BackgroundColor3 = Color3.fromRGB(35,35,35); frame.BackgroundTransparency = 0.15; frame.BorderSizePixel = 0; frame.Parent = gui
+    local dot = Instance.new("Frame"); dot.Name = "Dot"; dot.Size = UDim2.new(0,14,0,14); dot.Position = UDim2.new(0,8,0.5,-7)
+    dot.BackgroundColor3 = Color3.fromRGB(220,28,36); dot.BorderSizePixel = 0; dot.Parent = frame; dot.Visible = false; dot.ZIndex = 2; dot.ClipsDescendants = true
+    local label = Instance.new("TextLabel"); label.Name = "RecordingLabel"; label.Size = UDim2.new(1,-28,1,0); label.Position = UDim2.new(0,28,0,0)
+    label.BackgroundTransparency = 1; label.Text = "RECORDING"; label.Font = Enum.Font.SourceSansBold; label.TextSize = 18; label.TextColor3 = Color3.fromRGB(220,28,36)
+    label.TextXAlignment = Enum.TextXAlignment.Left; label.Parent = frame; label.Visible = false
+    pcall(function()
+        if UserInputService and UserInputService.TouchEnabled then else
+            local dragging = false; local dragInput, dragStart, startPos
+            frame.InputBegan:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true; dragStart = input.Position; startPos = frame.Position; input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then dragging = false end end) end end)
+            frame.InputChanged:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseMovement then dragInput = input end end)
+            RunService.Heartbeat:Connect(function() if dragging and dragInput and dragStart and startPos then local delta = UserInputService:GetMouseLocation() - dragStart; frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y) end end)
+        end
+    end)
+    local function setVisible(vis) if frame and frame.Parent then dot.Visible = vis; label.Visible = vis; frame.Visible = vis end end
+    return { Gui = gui, SetVisible = setVisible, Root = frame, Label = label, Dot = dot }
+end
+
+local RecordingGuiHandle = createStandaloneRecordingGui()
+if RecordingGuiHandle then pcall(function() RecordingGuiHandle.SetVisible(false) end) end
+
+local function showAssignmentToast(title, text, duration)
+    duration = tonumber(duration) or 2.2
+    local PlayerGui = LocalPlayer:FindFirstChild("PlayerGui") or LocalPlayer:FindFirstChildWhichIsA("PlayerGui") or Instance.new("PlayerGui", LocalPlayer)
+    local gui = Instance.new("ScreenGui"); gui.Name = "MacroAssignToast"; gui.ResetOnSpawn = false; gui.Parent = PlayerGui
+    local frame = Instance.new("Frame"); frame.Size = UDim2.new(0,320,0,48); frame.AnchorPoint = Vector2.new(0,0); frame.Position = UDim2.new(0.5,-160,0.06,0)
+    frame.BackgroundTransparency = 0.12; frame.BackgroundColor3 = Color3.fromRGB(20,20,20); frame.BorderSizePixel = 0; frame.Parent = gui
+    local titleLbl = Instance.new("TextLabel"); titleLbl.Size = UDim2.new(1,-16,0,20); titleLbl.Position = UDim2.new(0,8,0,6); titleLbl.BackgroundTransparency = 1
+    titleLbl.Font = Enum.Font.SourceSansBold; titleLbl.TextSize = 18; titleLbl.TextColor3 = Color3.fromRGB(200,200,200); titleLbl.TextXAlignment = Enum.TextXAlignment.Left
+    titleLbl.Text = tostring(title or "Assigned"); titleLbl.Parent = frame
+    local textLbl = Instance.new("TextLabel"); textLbl.Size = UDim2.new(1,-16,0,18); textLbl.Position = UDim2.new(0,8,0,26); textLbl.BackgroundTransparency = 1
+    textLbl.Font = Enum.Font.SourceSans; textLbl.TextSize = 14; textLbl.TextColor3 = Color3.fromRGB(170,170,170); textLbl.TextXAlignment = Enum.TextXAlignment.Left
+    textLbl.Text = tostring(text or ""); textLbl.Parent = frame
+    local ok, TweenService = pcall(function() return game:GetService("TweenService") end)
+    task.spawn(function() task.wait(duration); pcall(function() if ok and TweenService then local tween = TweenService:Create(frame, TweenInfo.new(0.25), { BackgroundTransparency = 1 }); tween:Play(); tween.Completed:Wait() end end); pcall(function() gui:Destroy() end) end)
+    return gui
+end
+
+-- Sync recording UI
+local function updateStandaloneRecordingUI()
+    local ok, ms = pcall(function() return (_G.MacroEngineAPI and _G.MacroEngineAPI.API and _G.MacroEngineAPI.API.GetMacroState and _G.MacroEngineAPI.API.GetMacroState()) or MacroState end)
+    local rec = false
+    if ok and type(ms) == "table" then rec = ms.Recording == true end
+    pcall(function() if RecordingGuiHandle then RecordingGuiHandle.SetVisible(rec) end end)
+end
+
+local origStart = MacroAPI.StartRecording; local origStop = MacroAPI.StopRecordingAndSave
+MacroAPI.StartRecording = function(name) if type(origStart) == "function" then pcall(origStart, name) end; pcall(updateStandaloneRecordingUI) end
+MacroAPI.StopRecordingAndSave = function(name) local res = nil; if type(origStop) == "function" then local ok, r = pcall(origStop, name); if ok then res = r end end; pcall(updateStandaloneRecordingUI); return res end
+
+task.spawn(function()
+    local last = nil
+    while task.wait(0.2) do
+        local rec = false
+        local ok, ms = pcall(function() return (_G.MacroEngineAPI and _G.MacroEngineAPI.API and _G.MacroEngineAPI.API.GetMacroState and _G.MacroEngineAPI.API.GetMacroState()) or MacroState end)
+        if ok and type(ms) == "table" then rec = ms.Recording == true end
+        if rec ~= last then last = rec; pcall(updateStandaloneRecordingUI) end
+    end
+end)
+
+-- Rayfield UI wiring
+if not Rayfield then print("Macro engine loaded, but Rayfield UI skipped because Rayfield failed to load."); return end
+local API = _G.MacroEngineAPI and _G.MacroEngineAPI.API or nil
+
+local function safeCall(fn, ...)
+    if not _G.MacroEngineAPI or not _G.MacroEngineAPI.API or type(_G.MacroEngineAPI.API[fn]) ~= "function" then warn(("safeCall: API.%s missing"):format(fn)); return nil end
+    local ok, res = pcall(_G.MacroEngineAPI.API[fn], ...)
+    if not ok then warn(("safeCall: API.%s error: %s"):format(fn, tostring(res))) end
+    return ok and res or nil
+end
+
+local function getMacroNames()
+    if API and type(API.GetMacroNames) == "function" then local ok, list = pcall(API.GetMacroNames); if ok and type(list) == "table" then return list end end
+    return {}
+end
+
+local function readDropdownValue(dd)
+    if not dd then return nil end
+    if type(dd.Value) == "string" and dd.Value ~= "" then return dd.Value end
+    if type(dd.CurrentOption) == "string" and dd.CurrentOption ~= "" then return dd.CurrentOption end
+    if type(dd.CurrentOption) == "table" and #dd.CurrentOption > 0 then return dd.CurrentOption[1] end
+    if type(dd.Value) == "table" and #dd.Value > 0 then return dd.Value[1] end
+    return nil
+end
+
+-- Ensure single Rayfield window
+if _G.CleanMacroWindow then
+    pcall(function()
+        local old = _G.CleanMacroWindow
+        if type(old.Destroy) == "function" then pcall(function() old:Destroy() end)
+        elseif type(old.Close) == "function" then pcall(function() old:Close() end)
+        elseif type(old.SetVisible) == "function" then pcall(function() old:SetVisible(false) end); if old.Parent and type(old.Parent.Destroy) == "function" then pcall(function() old.Parent:Destroy() end) end
+        end
+    end)
+    _G.CleanMacroWindow = nil
+end
+
+-- Create Window
+local Window = Rayfield:CreateWindow({ Name = "Clean Macro Template", KeySystem = false, ConfigurationSaving = { Enabled = true, FileName = "CleanMacroTemplate_config" } })
+_G.CleanMacroWindow = Window
+
+local function clearGlobalWindowRef() if _G.CleanMacroWindow == Window then _G.CleanMacroWindow = nil end end
+local tried = {"SetShouldCloseCallback","SetCloseCallback","SetOnClose","OnClose","SetCloseFunction","SetClose"}
+for _, name in ipairs(tried) do
+    local fn = rawget(Window, name) or Window[name]
+    if type(fn) == "function" then pcall(function() Window[name](Window, function() clearGlobalWindowRef(); return true end) end); break end
+end
+if type(Window.Destroy) == "function" then local origDestroy = Window.Destroy; Window.Destroy = function(self, ...) clearGlobalWindowRef(); return origDestroy(self, ...) end end
+
+-- Macro tab
+local macroTab = Window:CreateTab("Macro", 4483362458); macroTab:CreateSection("Macros")
+local macroDropdown = macroTab:CreateDropdown({ Name = "MacroSelect", Options = getMacroNames(), CurrentOption = {}, MultipleOptions = false, Flag = "Flag_MacroSelect", Callback = function(_) end })
+local nameInput = macroTab:CreateInput({ Name = "MacroName", CurrentValue = "", PlaceholderText = "macro_name", RemoveTextAfterFocusLost = false, Flag = "Flag_MacroName", Callback = function(_) end })
+local recordButton = macroTab:CreateButton({ Name = "Record / Stop", Flag = "Flag_RecordStop", Callback = function()
+    local state = API and API.GetMacroState and API.GetMacroState().Recording
+    if state then
+        local name = (nameInput and (nameInput.Value or nameInput.CurrentValue)) or ""
+        safeCall("StopRecordingAndSave", name)
+        local list = getMacroNames()
+        pcall(function() macroDropdown:Refresh(list) end)
+        pcall(function() macroDropdown:Set(list[#list]) end)
+    else
+        local name = (nameInput and (nameInput.Value or nameInput.CurrentValue)) or ""
+        safeCall("StartRecording", name)
+    end
+    pcall(updateStandaloneRecordingUI)
+end })
+local playToggle = macroTab:CreateToggle({ Name = "Play Macro (repeats)", CurrentValue = false, Flag = "Flag_PlayMacroRepeats", Callback = function(val)
+    if val then
+        local sel = readDropdownValue(macroDropdown)
+        if not sel then
+            local list = getMacroNames()
+            sel = list[1]
+        end
+        if sel then
+            safeCall("PlayMacroByName", sel)
+            pcall(function() playToggle:Set(true) end)
+        else
+            pcall(function() playToggle:Set(false) end)
+        end
+    else
+        safeCall("StopPlaying")
+        pcall(function() playToggle:Set(false) end)
+    end
+end })
+local deleteButton = macroTab:CreateButton({ Name = "Delete Selected Macro", Flag = "Flag_DeleteSelectedMacro", Callback = function()
+    local sel = readDropdownValue(macroDropdown)
+    if sel and sel ~= "" then
+        local ok = safeCall("DeleteMacro", sel)
+        if ok then
+            local list = getMacroNames()
+            pcall(function() macroDropdown:Refresh(list) end)
+            pcall(function() macroDropdown:Set(list[1] or "") end)
+        else
+            warn("DeleteMacro failed")
+        end
+    end
+end })
+local refreshButton = macroTab:CreateButton({ Name = "Refresh Macros", Flag = "Flag_RefreshMacros", Callback = function() local list = getMacroNames(); pcall(function() macroDropdown:Refresh(list) end) end })
+local exportButton = macroTab:CreateButton({ Name = "Copy Selected Macro JSON to Clipboard", Flag = "Flag_ExportMacroJSON", Callback = function()
+    local sel = readDropdownValue(macroDropdown)
+    if sel and sel ~= "" then
+        local json = safeCall("ExportMacroToJSON", sel)
+        if json and type(setclipboard) == "function" then pcall(setclipboard, json) end
+    end
+end })
+local importInput = macroTab:CreateInput({ Name = "Import: name\nJSON", CurrentValue = "imported_name\n[]", PlaceholderText = "imported_name\n[]", RemoveTextAfterFocusLost = false, Flag = "Flag_ImportBox", Callback = function(_) end })
+local importButton = macroTab:CreateButton({ Name = "Import Macro From Above", Flag = "Flag_ImportMacroFromAbove", Callback = function()
+    local raw = importInput and (importInput.Value or importInput.CurrentValue) or ""
+    local firstNewline = raw:find("\n"); local name, body
+    if firstNewline then
+        name = raw:sub(1, firstNewline - 1)
+        body = raw:sub(firstNewline + 1)
+    else
+        name = "imported_" .. tostring(os.time())
+        body = raw
+    end
+    safeCall("ImportMacroFromJSON", name, body)
+    local list = getMacroNames()
+    pcall(function() macroDropdown:Refresh(list) end)
+    pcall(function() macroDropdown:Set(name) end)
+end })
+
+-- Maps tab: UI wiring and Auto Maps worker
+local mapsTab = Window:CreateTab("Maps", 4483362458)
+mapsTab:CreateSection("Maps")
+
+-- Nights dropdown (1-10)
+local nights = {}
+for i = 1, 10 do table.insert(nights, tostring(i)) end
+local nightDropdown = mapsTab:CreateDropdown({
+    Name = "Night",
+    Options = nights,
+    CurrentOption = {}, -- start with nothing selected
+    MultipleOptions = false,
+    Flag = "Flag_NightDropdown",
+    Callback = function(_) end
+})
+
+-- Level dropdown (1-6)
+local levels = {}
+for i = 1, 6 do table.insert(levels, tostring(i)) end
+local levelDropdown = mapsTab:CreateDropdown({
+    Name = "Level",
+    Options = levels,
+    CurrentOption = {}, -- start with nothing selected
+    MultipleOptions = false,
+    Flag = "Flag_LevelDropdown",
+    Callback = function(_) end
+})
+
+-- Difficulty dropdown (Easy / Nightmare)
+local difficultyOptions = {"Easy", "Nightmare"}
+local difficultyDropdown = mapsTab:CreateDropdown({
+    Name = "Difficulty",
+    Options = difficultyOptions,
+    CurrentOption = {}, -- start with nothing selected
+    MultipleOptions = false,
+    Flag = "Flag_DifficultyDropdown",
+    Callback = function(_) end
+})
+
+-- normalizeDropdownSelection (helper extracted from earlier)
+local function normalizeDropdownSelection(dd)
+    if not dd then return nil end
+    local ok, val = pcall(function() return dd.Value end)
+    if ok and val and val ~= "" then return tostring(val) end
+    ok, val = pcall(function() return dd.CurrentOption end)
+    if ok and val and val ~= "" then
+        if type(val) == "table" and #val > 0 then return tostring(val[1]) end
+        return tostring(val)
+    end
+    ok, val = pcall(function() return dd:Get() end)
+    if ok and val and val ~= "" then return tostring(val) end
+    return nil
+end
+
+-- Helper: find CreateElevator and StartElevator remotes
+local function findCreateElevatorRemote()
+    local ok, netRoot = pcall(function()
+        return ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Packages")
+            :WaitForChild("_Index"):WaitForChild("sleitnick_net@0.2.0"):WaitForChild("net")
+    end)
+    if not ok or not netRoot then if LOG then warn("findCreateElevatorRemote: net root not found") end; return nil end
+    local r = netRoot:FindFirstChild("RE/CreateElevator") or netRoot:FindFirstChild("CreateElevator")
+    if r then return r end
+    local re = netRoot:FindFirstChild("RE")
+    if re then return re:FindFirstChild("CreateElevator") end
+    if LOG then warn("CreateElevator remote not found") end
+    return nil
+end
+
+local function findStartElevatorRemote()
+    local ok, netRoot = pcall(function()
+        return ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Packages")
+            :WaitForChild("_Index"):WaitForChild("sleitnick_net@0.2.0"):WaitForChild("net")
+    end)
+    if not ok or not netRoot then if LOG then warn("findStartElevatorRemote: net root not found") end; return nil end
+    local r = netRoot:FindFirstChild("RE/StartElevator") or netRoot:FindFirstChild("StartElevator")
+    if r then return r end
+    local re = netRoot:FindFirstChild("RE")
+    if re then return re:FindFirstChild("StartElevator") end
+    if LOG then warn("StartElevator remote not found") end
+    return nil
+end
+
+-- Dropdown -> MacroState wiring (persistent)
+local function wireDropdownToState(dd, fieldName)
+    if not dd then return end
+    dd.Callback = function(_)
+        local val = normalizeDropdownSelection(dd)
+        if val and val ~= "" then
+            MacroState[fieldName] = val
+            schedulePersist()
+        else
+            MacroState[fieldName] = nil
+            schedulePersist()
+        end
+    end
+    pcall(function()
+        local cur = MacroState[fieldName]
+        if cur and type(dd.Set) == "function" then dd:Set(tostring(cur)) end
+    end)
+end
+
+wireDropdownToState(nightDropdown, "SelectedNight")
+wireDropdownToState(levelDropdown, "SelectedLevel")
+wireDropdownToState(difficultyDropdown, "SelectedDifficulty")
+
+-- Build args exactly as requested (ElevatorIndex = 6, Tutorial=false, Endless=false, MaxMembers=1)
+local function buildRequestedCreateElevatorArgs()
+    local difficulty = MacroState.SelectedDifficulty or normalizeDropdownSelection(difficultyDropdown) or "Easy"
+    local nightStr = MacroState.SelectedNight or normalizeDropdownSelection(nightDropdown)
+    local levelStr = MacroState.SelectedLevel or normalizeDropdownSelection(levelDropdown)
+    local night = tonumber(nightStr) or 1
+    local level = tonumber(levelStr) or 1
+    return {
+        {
+            Difficulty = tostring(difficulty),
+            Night = night,
+            Tutorial = false,
+            ElevatorIndex = 6,
+            Level = level,
+            Endless = false,
+            MaxMembers = 1,
+        }
+    }
+end
+
+-- Auto Maps worker control
+local function startAutoMapsWorker()
+    if MacroState._autoMapsThread and type(MacroState._autoMapsThread.cancel) == "function" then return end
+    local running = true
+    local thread = {}
+    function thread.cancel() running = false end
+    MacroState._autoMapsThread = thread
+
+    task.spawn(function()
+        local createRemote, startRemote = nil, nil
+        local retryDelay = 2.0
+        while running and MacroState.AutoMapsEnabled do
+            -- lazy-resolve remotes
+            if not createRemote then createRemote = findCreateElevatorRemote() end
+            if not startRemote then startRemote = findStartElevatorRemote() end
+
+            if not createRemote then
+                if LOG then warn("AutoMaps: CreateElevator remote not available; retrying") end
+                local waited = 0
+                while waited < retryDelay and running and MacroState.AutoMapsEnabled do task.wait(0.25); waited = waited + 0.25 end
+                if not running or not MacroState.AutoMapsEnabled then break end
+                continue
+            end
+
+            -- Build args and call CreateElevator
+            local args = buildRequestedCreateElevatorArgs()
+            local ok, err = pcall(function()
+                if typeof(createRemote.FireServer) == "function" then
+                    createRemote:FireServer(unpack(args))
+                else
+                    createRemote(unpack(args))
+                end
+            end)
+            if not ok then
+                if LOG then warn("AutoMaps CreateElevator failed:", err) end
+                task.wait(retryDelay)
+                continue
+            end
+
+            -- Immediately attempt StartElevator (it's okay if startRemote is nil; we resolve and try)
+            if not startRemote then startRemote = findStartElevatorRemote() end
+            if startRemote then
+                local ok2, err2 = pcall(function()
+                    if typeof(startRemote.FireServer) == "function" then
+                        startRemote:FireServer()
+                    else
+                        startRemote()
+                    end
+                end)
+                if not ok2 and LOG then warn("AutoMaps StartElevator failed:", err2) end
+            else
+                if LOG then warn("AutoMaps: StartElevator remote not available") end
+            end
+
+            -- After firing, wait a short interval before next cycle while enabled
+            local waited = 0
+            while waited < 2.0 and running and MacroState.AutoMapsEnabled do task.wait(0.25); waited = waited + 0.25 end
+        end
+
+        if MacroState._autoMapsThread == thread then MacroState._autoMapsThread = nil end
+    end)
+end
+
+local function stopAutoMapsWorker()
+    if MacroState._autoMapsThread and type(MacroState._autoMapsThread.cancel) == "function" then
+        MacroState._autoMapsThread.cancel()
+        MacroState._autoMapsThread = nil
+    end
+end
+
+-- Auto Maps toggle
+local autoMapsToggle = mapsTab:CreateToggle({
+    Name = "Auto Maps",
+    CurrentValue = MacroState.AutoMapsEnabled or false,
+    Flag = "Flag_AutoMapsToggle",
+    Callback = function(val)
+        MacroState.AutoMapsEnabled = val and true or false
+        schedulePersist()
+        if MacroState.AutoMapsEnabled then
+            startAutoMapsWorker()
+        else
+            stopAutoMapsWorker()
+        end
+        pcall(function() if autoMapsToggle and type(autoMapsToggle.Set) == "function" then autoMapsToggle:Set(MacroState.AutoMapsEnabled) end end)
+    end
+})
+pcall(function() if autoMapsToggle and type(autoMapsToggle.Set) == "function" then autoMapsToggle:Set(MacroState.AutoMapsEnabled) end end)
+
+-- AutoMaps tab: UI only
+local autoMapsTab = Window:CreateTab("AutoMaps", 4483362458)
+autoMapsTab:CreateSection("AutoMaps")
+
+-- Macro (assign) dropdown (moved here)
+local autoMapsMacroDropdown = autoMapsTab:CreateDropdown({
+    Name = "Macro (assign)",
+    Options = {}, -- populated via Refresh button
+    CurrentOption = {},
+    MultipleOptions = false,
+    Flag = "Flag_AutoMaps_MacroAssignDropdown",
+    Callback = function(_) end
+})
+
+-- Assign button (stores assignment into AutoMission.Assigned)
+local assignAutoMapButton = autoMapsTab:CreateButton({
+    Name = "Assign Macro to Night/Level/Difficulty",
+    Flag = "Flag_AssignMacroToMap_AutoMapsTab",
+    Callback = function()
+        local night = normalizeDropdownSelection(nightDropdown) or MacroState.SelectedNight
+        local level = normalizeDropdownSelection(levelDropdown) or MacroState.SelectedLevel
+        local difficulty = normalizeDropdownSelection(difficultyDropdown) or MacroState.SelectedDifficulty
+        local macro = readDropdownValue(autoMapsMacroDropdown)
+
+        if not night or night == "" or not level or level == "" then
+            pcall(function() showAssignmentToast("Assign Failed", "Select Night and Level first (use Maps tab)", 2.2) end)
+            return
+        end
+        if not difficulty or difficulty == "" then
+            pcall(function() showAssignmentToast("Assign Failed", "Select Difficulty (use Maps tab)", 2.2) end)
+            return
+        end
+        if not macro or macro == "" then
+            pcall(function() showAssignmentToast("Assign Failed", "Select a macro to assign", 2.2) end)
+            return
+        end
+        local key = ("Night %s - Level %s - %s"):format(night, level, difficulty)
+        local ok = safeCall("AssignMacroToSlot", key, macro)
+        if ok then
+            pcall(function() showAssignmentToast("Macro Assigned", ('\'%s\' -> %s'):format(macro, key), 2.2) end)
+        else
+            pcall(function() showAssignmentToast("Assign Failed", ('Could not assign \'%s\' to %s'):format(macro, key), 2.2) end)
+        end
+    end
+})
+
+-- Refresh Macros button (populates the Macro (assign) dropdown in AutoMaps tab)
+local refreshAutoMapsMacrosButton = autoMapsTab:CreateButton({
+    Name = "Refresh Macros",
+    Flag = "Flag_RefreshAutoMaps_Macros",
+    Callback = function()
+        local list = getMacroNames()
+        pcall(function() autoMapsMacroDropdown:Refresh(list) end)
+    end
+})
+
+-- Auto Map Macro toggle: UI-only, no watcher or playback
+local autoMapMacroToggle = autoMapsTab:CreateToggle({
+    Name = "Auto Map Macro",
+    CurrentValue = MacroState.AutoMapMacro or false,
+    Flag = "Flag_AutoMapMacro",
+    Callback = function(val)
+        MacroState.AutoMapMacro = val and true or false
+        schedulePersist()
+    end
+})
+
+-- Misc tab
+local miscTab = Window:CreateTab("Misc", 4483362458); miscTab:CreateSection("Utilities")
+
+local function findNetRoot()
+    local ok, netRoot = pcall(function()
+        return ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Packages"):WaitForChild("_Index"):WaitForChild("sleitnick_net@0.2.0"):WaitForChild("net")
+    end)
+    if not ok or not netRoot then return nil end; return netRoot
+end
+
+local function findVoteRemote()
+    local netRoot = findNetRoot(); if not netRoot then return nil end
+    local vote = netRoot:FindFirstChild("RE/VoteEvent") or netRoot:FindFirstChild("VoteEvent")
+    if vote then return vote end
+    local re = netRoot:FindFirstChild("RE"); if re then return re:FindFirstChild("VoteEvent") end
+    return nil
+end
+
+local function findUpdateGameSpeedRemote()
+    local netRoot = findNetRoot(); if not netRoot then return nil end
+    local r = netRoot:FindFirstChild("RE/UpdateGameSpeed") or netRoot:FindFirstChild("UpdateGameSpeed")
+    if r then return r end
+    local re = netRoot:FindFirstChild("RE"); if re then return re:FindFirstChild("UpdateGameSpeed") end
+    return nil
+end
+
+local function findUpgradeAllRemote()
+    local netRoot = findNetRoot(); if not netRoot then return nil end
+    local r = netRoot:FindFirstChild("RE/UpgradeAll") or netRoot:FindFirstChild("UpgradeAll")
+    if r then return r end
+    local re = netRoot:FindFirstChild("RE"); if re then return re:FindFirstChild("UpgradeAll") end
+    return nil
+end
+
+-- AutoRetry worker (Every 10s: VoteEvent "Again")
+local function startAutoRetryWorker()
+    if MacroState._autoRetryThread and type(MacroState._autoRetryThread.cancel) == "function" then return end
+    local running = true; local thread = {}; function thread.cancel() running = false end; MacroState._autoRetryThread = thread
+    task.spawn(function()
+        local voteRemote = findVoteRemote()
+        while running and MacroState.AutoRetry do
+            if not voteRemote then voteRemote = findVoteRemote() end
+            if voteRemote then
+                local ok, err = pcall(function() local args = {"Again"}; if typeof(voteRemote.FireServer) == "function" then voteRemote:FireServer(unpack(args)) else voteRemote(unpack(args)) end end)
+                if not ok and LOG then warn("AutoRetry VoteEvent failed:", err) end
+            else if LOG then warn("AutoRetry: VoteEvent not found") end end
+            local waited = 0; while waited < 10 and running and MacroState.AutoRetry do task.wait(0.25); waited = waited + 0.25 end
+        end
+        if MacroState._autoRetryThread == thread then MacroState._autoRetryThread = nil end
+    end)
+end
+local function stopAutoRetryWorker() if MacroState._autoRetryThread and type(MacroState._autoRetryThread.cancel) == "function" then MacroState._autoRetryThread.cancel(); MacroState._autoRetryThread = nil end end
+
+-- AutoUpgrade worker (call UpgradeAll every 5s)
+local function startAutoUpgradeWorker()
+    if MacroState._autoUpgradeThread and type(MacroState._autoUpgradeThread.cancel) == "function" then return end
+    local running = true
+    local thread = {}
+    function thread.cancel() running = false end
+    MacroState._autoUpgradeThread = thread
+
+    task.spawn(function()
+        while running and MacroState.AutoUpgrade do
+            local ok, err = pcall(function()
+                game:GetService("ReplicatedStorage")
+                    :WaitForChild("Shared")
+                    :WaitForChild("Packages")
+                    :WaitForChild("_Index")
+                    :WaitForChild("sleitnick_net@0.2.0")
+                    :WaitForChild("net")
+                    :WaitForChild("RE/UpgradeAll")
+                    :FireServer()
+            end)
+            if not ok and LOG then warn("AutoUpgrade FireServer error:", err) end
+
+            local waited = 0
+            while waited < 5 and running and MacroState.AutoUpgrade do
+                task.wait(0.25)
+                waited = waited + 0.25
+            end
+        end
+
+        if MacroState._autoUpgradeThread == thread then MacroState._autoUpgradeThread = nil end
+    end)
+end
+
+local function stopAutoUpgradeWorker()
+    if MacroState._autoUpgradeThread and type(MacroState._autoUpgradeThread.cancel) == "function" then
+        MacroState._autoUpgradeThread.cancel()
+        MacroState._autoUpgradeThread = nil
+    end
+end
+
+-- AutoStart worker: VoteEvent "StartGame" once per mission when wave becomes 1
+local function startAutoStartWorker()
+    if MacroState._autoStartThread and type(MacroState._autoStartThread.cancel) == "function" then return end
+    local running = true; local thread = {}; function thread.cancel() running = false end; MacroState._autoStartThread = thread
+    task.spawn(function()
+        local voteRemote = findVoteRemote()
+        MacroState._lastWave = MacroState._lastWave or getCurrentWave()
+        MacroState._startFiredThisMission = MacroState._startFiredThisMission or false
+        while running and MacroState.AutoStart do
+            local w = getCurrentWave()
+            if w == 1 then if MacroState._lastWave and MacroState._lastWave ~= 1 then MacroState._startFiredThisMission = false end end
+            if w == 1 and not MacroState._startFiredThisMission then
+                if not voteRemote then voteRemote = findVoteRemote() end
+                if voteRemote then
+                    local ok, err = pcall(function() local args = {"StartGame"}; if typeof(voteRemote.FireServer) == "function" then voteRemote:FireServer(unpack(args)) else voteRemote(unpack(args)) end end)
+                    if not ok and LOG then warn("AutoStart VoteEvent failed:", err) end
+                    MacroState._startFiredThisMission = true
+                else if LOG then warn("AutoStart: VoteEvent remote not found") end end
+            end
+            MacroState._lastWave = w
+            local waited = 0; while waited < 0.5 and running and MacroState.AutoStart do task.wait(0.25); waited = waited + 0.25 end
+        end
+        if MacroState._autoStartThread == thread then MacroState._autoStartThread = nil end
+    end)
+end
+local function stopAutoStartWorker() if MacroState._autoStartThread and type(MacroState._autoStartThread.cancel) == "function" then MacroState._autoStartThread.cancel(); MacroState._autoStartThread = nil end end
+
+-- Auto X2 worker: UpdateGameSpeed once per mission when wave becomes 1; plus optional startup fire
+local function startAutoX2Worker()
+    if MacroState._autoX2Thread and type(MacroState._autoX2Thread.cancel) == "function" then return end
+    local running = true
+    local thread = {}
+    function thread.cancel() running = false end
+    MacroState._autoX2Thread = thread
+
+    task.spawn(function()
+        local updRemote = findUpdateGameSpeedRemote()
+        local initialWave = getCurrentWave()
+        MacroState._lastWave = MacroState._lastWave or initialWave
+        MacroState._x2FiredThisMission = MacroState._x2FiredThisMission or false
+        local allowStartupFire = (initialWave ~= nil and initialWave ~= 1)
+        while running and MacroState.AutoX2 do
+            local w = getCurrentWave()
+            if w == 1 and MacroState._lastWave and MacroState._lastWave ~= 1 then
+                MacroState._x2FiredThisMission = false
+                allowStartupFire = false
+            end
+            if allowStartupFire and not MacroState._x2FiredThisMission then
+                if not updRemote then updRemote = findUpdateGameSpeedRemote() end
+                if updRemote then
+                    local ok, err = pcall(function()
+                        if typeof(updRemote.FireServer) == "function" then updRemote:FireServer() else updRemote() end
+                    end)
+                    if not ok and LOG then warn("AutoX2 startup UpdateGameSpeed failed:", err) end
+                    MacroState._x2FiredThisMission = true
+                else if LOG then warn("AutoX2 startup: UpdateGameSpeed remote not found") end end
+                allowStartupFire = false
+            end
+            if w == 1 and not MacroState._x2FiredThisMission then
+                if not updRemote then updRemote = findUpdateGameSpeedRemote() end
+                if updRemote then
+                    local ok, err = pcall(function()
+                        if typeof(updRemote.FireServer) == "function" then updRemote:FireServer() else updRemote() end
+                    end)
+                    if not ok and LOG then warn("AutoX2 UpdateGameSpeed failed:", err) end
+                    MacroState._x2FiredThisMission = true
+                else if LOG then warn("AutoX2: UpdateGameSpeed remote not found") end end
+            end
+            MacroState._lastWave = w
+            local waited = 0
+            while waited < 0.5 and running and MacroState.AutoX2 do
+                task.wait(0.25)
+                waited = waited + 0.25
+            end
+        end
+        if MacroState._autoX2Thread == thread then MacroState._autoX2Thread = nil end
+    end)
+end
+
+local function stopAutoX2Worker()
+    if MacroState._autoX2Thread and type(MacroState._autoX2Thread.cancel) == "function" then
+        MacroState._autoX2Thread.cancel()
+        MacroState._autoX2Thread = nil
+    end
+end
+
+-- Auto Next worker: VoteEvent "Next" every 10s
+local function findVoteEventRemote()
+    local ok, netRoot = pcall(function()
+        return ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Packages"):WaitForChild("_Index"):WaitForChild("sleitnick_net@0.2.0"):WaitForChild("net")
+    end)
+    if not ok or not netRoot then return nil end
+    local r = netRoot:FindFirstChild("RE/VoteEvent") or netRoot:FindFirstChild("VoteEvent")
+    if r then return r end
+    local re = netRoot:FindFirstChild("RE")
+    if re then return re:FindFirstChild("VoteEvent") end
+    return nil
+end
+
+local function startAutoNextWorker()
+    if MacroState._autoNextThread and type(MacroState._autoNextThread.cancel) == "function" then return end
+    local running = true
+    local thread = {}
+    function thread.cancel() running = false end
+    MacroState._autoNextThread = thread
+
+    task.spawn(function()
+        local voteRemote = findVoteEventRemote()
+        while running and MacroState.AutoNext do
+            if not voteRemote then voteRemote = findVoteEventRemote() end
+            if voteRemote then
+                local ok, err = pcall(function()
+                    local args = { "Next" }
+                    if typeof(voteRemote.FireServer) == "function" then
+                        voteRemote:FireServer(unpack(args))
+                    else
+                        voteRemote(unpack(args))
+                    end
+                end)
+                if not ok and LOG then warn("AutoNext VoteEvent failed:", err) end
+            else
+                if LOG then warn("AutoNext: VoteEvent remote not found") end
+            end
+
+            local waited = 0
+            while waited < 10 and running and MacroState.AutoNext do
+                task.wait(0.25)
+                waited = waited + 0.25
+            end
+        end
+
+        if MacroState._autoNextThread == thread then MacroState._autoNextThread = nil end
+    end)
+end
+
+local function stopAutoNextWorker()
+    if MacroState._autoNextThread and type(MacroState._autoNextThread.cancel) == "function" then
+        MacroState._autoNextThread.cancel()
+        MacroState._autoNextThread = nil
+    end
+end
+
+-- Rayfield toggles (Misc)
+local autoRetryToggle = miscTab:CreateToggle({ Name = "Auto Retry", CurrentValue = MacroState.AutoRetry or false, Flag = "Flag_AutoRetry", Callback = function(val) MacroState.AutoRetry = val and true or false; schedulePersist(); if MacroState.AutoRetry then startAutoRetryWorker() else stopAutoRetryWorker() end end })
+local autoX2Toggle = miscTab:CreateToggle({ Name = "Auto x2 Speed", CurrentValue = MacroState.AutoX2 or false, Flag = "Flag_AutoX2", Callback = function(val) MacroState.AutoX2 = val and true or false; schedulePersist(); if MacroState.AutoX2 then startAutoX2Worker() else stopAutoX2Worker() end end })
+local autoUpgradeToggle = miscTab:CreateToggle({ Name = "Auto Upgrade", CurrentValue = MacroState.AutoUpgrade or false, Flag = "Flag_AutoUpgrade", Callback = function(val) MacroState.AutoUpgrade = val and true or false; schedulePersist(); if MacroState.AutoUpgrade then startAutoUpgradeWorker() else stopAutoUpgradeWorker() end end })
+local autoStartToggle = miscTab:CreateToggle({ Name = "Auto Start", CurrentValue = MacroState.AutoStart or false, Flag = "Flag_AutoStart", Callback = function(val) MacroState.AutoStart = val and true or false; schedulePersist(); if MacroState.AutoStart then startAutoStartWorker() else stopAutoStartWorker() end end })
+local autoNextToggle = miscTab:CreateToggle({ Name = "Auto Next", CurrentValue = MacroState.AutoNext or false, Flag = "Flag_AutoNext", Callback = function(val) MacroState.AutoNext = val and true or false; schedulePersist(); if MacroState.AutoNext then startAutoNextWorker() else stopAutoNextWorker() end end })
+
+-- Wire initial states and ensure macro lists are populated for dropdowns
+pcall(function() autoMapsMacroDropdown:Refresh(getMacroNames()) end)
+pcall(function() macroDropdown:Refresh(getMacroNames()) end)
+pcall(function() autoMapsMacroDropdown:Set("") end)
+pcall(function() macroDropdown:Set(getMacroNames()[1] or "") end)
+
+-- load/save config for Rayfield
+pcall(function() if type(Rayfield.LoadConfiguration) == "function" then pcall(function() Rayfield.LoadConfiguration() end) end end)
+
+local function installCloseCallback(win, fn)
+    if not win or type(fn) ~= "function" then return end
+    local tries = {"SetShouldCloseCallback","SetCloseCallback","SetOnClose","OnClose","SetCloseFunction","SetClose"}
+    for _, name in ipairs(tries) do
+        local m = rawget(win, name) or win[name]
+        if type(m) == "function" then pcall(function() win[name](win, fn) end); return end
+    end
+    if type(win.Set) == "function" then pcall(function() win:Set("ShouldCloseCallback", fn) end) end
+end
+
+installCloseCallback(Window, function()
+    pcall(function() safeCall("StopPlaying") end)
+    pcall(function() safeCall("SetAutoMissionEnabled", false) end)
+    pcall(updateStandaloneRecordingUI)
+    stopAutoMapsWorker()
+    clearGlobalWindowRef()
+    return true
+end)
+
+pcall(function()
+    pcall(function() if autoRetryToggle.Set then autoRetryToggle:Set(MacroState.AutoRetry) end end)
+    pcall(function() if autoX2Toggle.Set then autoX2Toggle:Set(MacroState.AutoX2) end end)
+    pcall(function() if autoUpgradeToggle.Set then autoUpgradeToggle:Set(MacroState.AutoUpgrade) end end)
+    pcall(function() if autoStartToggle.Set then autoStartToggle:Set(MacroState.AutoStart) end end)
+    pcall(function() if autoNextToggle.Set then autoNextToggle:Set(MacroState.AutoNext) end end)
+    pcall(function() if autoMapMacroToggle.Set then autoMapMacroToggle:Set(MacroState.AutoMapMacro) end end)
+    pcall(function() if autoMapsToggle.Set then autoMapsToggle:Set(MacroState.AutoMapsEnabled) end end)
+    if MacroState.AutoMission and MacroState.AutoMission.Enabled then safeCall("SetAutoMissionEnabled", true) end
+    if MacroState.AutoRetry then startAutoRetryWorker() end
+    if MacroState.AutoX2 then startAutoX2Worker() end
+    if MacroState.AutoUpgrade then startAutoUpgradeWorker() end
+    if MacroState.AutoStart then startAutoStartWorker() end
+    if MacroState.AutoNext then startAutoNextWorker() end
+    if MacroState.AutoMapsEnabled then startAutoMapsWorker() end
+end)
+
+_G.MacroEngineAPI = _G.MacroEngineAPI or {}
+_G.MacroEngineAPI.SaveConfig = function()
+    pcall(function()
+        if type(Rayfield.SaveConfiguration) == "function" then
+            pcall(function() Rayfield.SaveConfiguration() end)
+        elseif type(Rayfield.LoadConfiguration) == "function" and type(Rayfield.SaveConfiguration) == "nil" then
+            pcall(function() Rayfield.LoadConfiguration() end)
+        end
+    end)
+end
+
+-- End of file: tidy up any leftover state if needed
+pcall(function()
+    if MacroState.SelectedNight and nightDropdown and type(nightDropdown.Set) == "function" then
+        pcall(function() nightDropdown:Set(tostring(MacroState.SelectedNight)) end)
+    end
+    if MacroState.SelectedLevel and levelDropdown and type(levelDropdown.Set) == "function" then
+        pcall(function() levelDropdown:Set(tostring(MacroState.SelectedLevel)) end)
+    end
+    if MacroState.SelectedDifficulty and difficultyDropdown and type(difficultyDropdown.Set) == "function" then
+        pcall(function() difficultyDropdown:Set(tostring(MacroState.SelectedDifficulty)) end)
+    end
+end)
+
+-- Script loaded
+if LOG then print("Clean Macro Template loaded successfully") end
