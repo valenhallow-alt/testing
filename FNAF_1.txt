@@ -1,11 +1,5 @@
--- Full Macro + GUID + Placement watcher + Rayfield UI script
--- Paste into a LocalScript or run via your executor. This file combines:
--- 1) Rayfield UI for macros
--- 2) Separate recording ScreenGui
--- 3) Macro recording/playback system (fires MacroEvent)
--- 4) MacroGuidHelper (scans for GUIDs and wraps spawn remote)
--- 5) TowerPlacementWatcher (captures placed towers and CFrames)
--- 6) Convenience API for macros to place towers by GUID + CFrame
+-- Full Macro + GUID + Placement watcher + Rayfield UI script (no Rayfield boxes)
+-- Paste into a LocalScript or run via your executor.
 
 -- ======= Configuration =======
 local debugX = true
@@ -157,7 +151,8 @@ local function playMacroByName(name, repeats)
                 KeyCode = ev.KeyCode,
                 Position = ev.Position,
                 GameProcessed = ev.GameProcessed,
-                Timestamp = tick()
+                Timestamp = tick(),
+                Placement = ev.Placement -- may be nil
             })
         end
 
@@ -278,7 +273,7 @@ end
 
 local RecordingGui = createRecordingGui()
 
--- ======= Rayfield UI elements (no extra state boxes) =======
+-- ======= Rayfield UI elements (no Rayfield boxes) =======
 MacroDropdown = Tab:CreateDropdown({
     Name = "MacroSelect",
     Options = {},
@@ -304,8 +299,6 @@ MacroNameInput = Tab:CreateInput({
     Callback = function(Text) end,
 })
 
-local RecordStateLabel = Tab:CreateLabel("Idle", 4483362458, Color3.fromRGB(255,255,255), false)
-
 local RecordButton = Tab:CreateButton({
     Name = "Record / Stop",
     Callback = function()
@@ -317,7 +310,6 @@ local RecordButton = Tab:CreateButton({
             inputConn[1] = UserInputService.InputBegan:Connect(onInputBegan)
             inputConn[2] = UserInputService.InputEnded:Connect(onInputEnded)
             if RecordingGui then RecordingGui.Enabled = true end
-            if RecordStateLabel then RecordStateLabel:Set("Recording...") end
         else
             isRecording = false
             if inputConn then
@@ -337,7 +329,6 @@ local RecordButton = Tab:CreateButton({
                 CurrentMacro = name
             end
             if RecordingGui then RecordingGui.Enabled = false end
-            if RecordStateLabel then RecordStateLabel:Set("Idle") end
         end
     end,
 })
@@ -384,8 +375,6 @@ local RefreshButton = Tab:CreateButton({
         refreshMacroDropdown()
     end,
 })
-
-Tab:CreateParagraph({Title = "Macros", Content = "Record keyboard/mouse input. Playback fires MacroEvent in ReplicatedStorage/workspace. Connect to it to perform actions on playback."})
 
 -- ======= Expose macro API =======
 _G.RayfieldMacros = {
@@ -825,24 +814,8 @@ startWatching()
 _G.TowerPlacementWatcher = TowerPlacementWatcher
 
 -- ======= Convenience: auto-attach placement data to macro events (optional) =======
--- When recording, if a placement is detected shortly after a recorded input, append placement info to the last recorded event.
-local function tryAttachPlacementToRecording()
-    if not isRecording then return end
-    -- Wait briefly for placement to appear
-    local rec, err = TowerPlacementWatcher.WaitForNextPlacement(2)
-    if rec then
-        -- attach to last recorded event if exists
-        if currentRecording and #currentRecording > 0 then
-            local last = currentRecording[#currentRecording]
-            last.Placement = { name = rec.name, uuid = rec.uuid, cframe = rec.cframe }
-        end
-    end
-end
-
--- Example: connect MacroEvent listener to detect placement captures and attach if recording
 MacroEvent.Event:Connect(function(data)
     if data.EventType == "PlacementCaptured" then
-        -- placement captured; attach if recording
         if isRecording and currentRecording and #currentRecording > 0 then
             local last = currentRecording[#currentRecording]
             last.Placement = { name = data.name, uuid = data.uuid, cframe = data.cframe }
@@ -850,21 +823,9 @@ MacroEvent.Event:Connect(function(data)
     end
 end)
 
--- ======= Example playback listener (user should implement actual actions) =======
--- This sample shows how to react to MacroEvent during playback.
--- It looks for events that include Placement info and calls PlaceTower.
+-- ======= Example playback listener (handles Placement payloads) =======
 MacroEvent.Event:Connect(function(ev)
-    -- ev may be a playback event or a placement-captured event
-    if ev.EventType == "PlacementCaptured" then
-        -- handled elsewhere
-        return
-    end
-
-    -- If playback event includes Placement data, attempt to place tower
-    if ev and ev.Type and ev.Type == "Began" and ev.KeyCode and tostring(ev.KeyCode) == "Enum.KeyCode.ButtonR2" then
-        -- example: ignore; placeholder for custom logic
-    end
-    -- If the macro event contains a Placement payload (when recorded), handle it
+    if ev.EventType == "PlacementCaptured" then return end
     if ev and ev.Placement then
         local p = ev.Placement
         if p.uuid and p.cframe then
@@ -879,9 +840,8 @@ end)
 -- ======= Finalize =======
 Rayfield:LoadConfiguration()
 
--- Print summary for debugging
 if debugX then
-    print("[MacroSystem] Initialized.")
+    print("[MacroSystem] Initialized without Rayfield boxes.")
     print("[MacroSystem] Macros available:", #MacroNames)
     print("[MacroSystem] MacroEvent located at:", MacroEvent and MacroEvent:GetFullName() or "nil")
     if MacroGuidHelper._spawnRemote then
