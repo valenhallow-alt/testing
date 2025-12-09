@@ -1,79 +1,30 @@
--- Placement Macro Manager (Rayfield)
--- Full script (silenced outputs)
--- All prints, warns, and setMacroInfo popups are silenced when SILENCE_OUTPUTS = true
+-- Full Macro + GUID + Placement watcher + Rayfield UI script
+-- Paste into a LocalScript or run via your executor. This file combines:
+-- 1) Rayfield UI for macros
+-- 2) Separate recording ScreenGui
+-- 3) Macro recording/playback system (fires MacroEvent)
+-- 4) MacroGuidHelper (scans for GUIDs and wraps spawn remote)
+-- 5) TowerPlacementWatcher (captures placed towers and CFrames)
+-- 6) Convenience API for macros to place towers by GUID + CFrame
 
--- === SILENCE OUTPUTS FLAG ===
-local SILENCE_OUTPUTS = true
-if SILENCE_OUTPUTS then
-    print = function() end
-    warn  = function() end
-end
+-- ======= Configuration =======
+local debugX = true
 
--- Services
-local HttpService = game:GetService("HttpService")
-local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local CoreGui = game:GetService("CoreGui")
-local RunService = game:GetService("RunService")
-local player = Players.LocalPlayer
+-- ======= Rayfield load =======
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
 
--- Helper: poll for a child with timeout (returns object or nil)
-local function getFolder(parent, name, timeout)
-    timeout = timeout or 1.5
-    local t0 = tick()
-    local found = parent and parent:FindFirstChild(name)
-    while not found and tick() - t0 < timeout do
-        task.wait(0.05)
-        found = parent and parent:FindFirstChild(name)
-    end
-    return found
-end
-
--- Try to get main/defense but don't block forever
-local main = getFolder(ReplicatedStorage, "MainSharedFolder", 1.5) or getFolder(ReplicatedStorage, "MainShared", 1.5)
-local defense = getFolder(ReplicatedStorage, "DefenseSharedFolder", 1.5) or getFolder(ReplicatedStorage, "DefenseShared", 1.5)
-
--- Robust Rayfield loader: returns Rayfield or a safe stub
-local function safeLoadRayfield()
-    local ok, RayfieldOrErr = pcall(function()
-        return Rayfield or (loadstring(game:HttpGet('https://sirius.menu/rayfield'))())
-    end)
-    if not ok or not RayfieldOrErr then
-        return {
-            CreateWindow = function()
-                return {
-                    CreateTab = function()
-                        return {
-                            CreateSection = function() end,
-                            CreateInput = function() return { CurrentValue = "", Callback = function() end } end,
-                            CreateDropdown = function() return { Refresh = function() end, CurrentOption = {}, Callback = function() end } end,
-                            CreateButton = function() return { Callback = function() end } end,
-                            CreateToggle = function() return { CurrentValue = false, Callback = function() end } end,
-                            CreateDivider = function() return nil end,
-                        }
-                    end
-                }
-            end,
-            Flags = {},
-            LoadConfiguration = function() end,
-            SaveConfiguration = function() end
-        }
-    end
-    return RayfieldOrErr
-end
-
-local Rayfield = safeLoadRayfield()
 local Window = Rayfield:CreateWindow({
-   Name = "AnimeUltaVerseTd by  https://scriptblox.com/u/ValenHallow1",
+   Name = "Rayfield Example Window",
    Icon = 0,
-   Theme = "DarkBlue",
-   ToggleUIKeybind = "K",
-   DisableRayfieldPrompts = true,
-   DisableBuildWarnings = true,
+   LoadingTitle = "Rayfield Interface Suite",
+   LoadingSubtitle = "by Sirius",
+   Theme = "Default",
+   DisableRayfieldPrompts = false,
+   DisableBuildWarnings = false,
    ConfigurationSaving = {
       Enabled = true,
       FolderName = nil,
-      FileName = "ReEe Hub"
+      FileName = "Big Hub"
    },
    Discord = {
       Enabled = false,
@@ -92,2403 +43,850 @@ local Window = Rayfield:CreateWindow({
    }
 })
 
--- =========================
--- Defensive helpers
--- =========================
+local Tab = Window:CreateTab("Main", 4483362458)
+local Section = Tab:CreateSection("Macros")
 
-local function getHumanoid(model)
-    if not model or not model:IsA("Model") then return nil end
-    local h = model:FindFirstChild("Humanoid")
-    if h and h:IsA("Humanoid") then return h end
-    for _, d in ipairs(model:GetDescendants()) do
-        if d and d:IsA("Humanoid") then
-            return d
-        end
+-- ======= Services & locals =======
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local workspace = workspace
+local LocalPlayer = Players.LocalPlayer
+
+-- ======= Bindable event for macro playback and placement capture =======
+local MacroEvent = Instance.new("BindableEvent")
+MacroEvent.Name = "MacroEvent"
+MacroEvent.Parent = ReplicatedStorage or workspace
+
+-- ======= Macro storage & recording state =======
+local Macros = {}           -- name -> { events = {...} }
+local MacroNames = {}       -- list for dropdown
+local CurrentMacro = nil
+
+local isRecording = false
+local recordingStart = 0
+local currentRecording = {}
+local inputConn = nil
+
+-- ======= Helper: refresh dropdown =======
+local MacroDropdown, MacroNameInput, PlayToggle -- forward refs
+
+local function refreshMacroDropdown()
+    MacroNames = {}
+    for name, _ in pairs(Macros) do
+        table.insert(MacroNames, name)
     end
-    return nil
-end
-
-local function warnIfNoHumanoid(model, context)
-    if not model then return end
-    if not getHumanoid(model) then
-        -- silenced by global warn override when SILENCE_OUTPUTS = true
-        warn(("[SafeCheck] %s: model '%s' has no Humanoid"):format(tostring(context or "check"), tostring(model:GetFullName())))
-    end
-end
-
-local function readFlag(flagName)
-    if not Rayfield or not Rayfield.Flags then return nil end
-    local f = Rayfield.Flags[flagName]
-    if f == nil then return nil end
-    local ok, v = pcall(function() return f.Value end)
-    if not ok then return nil end
-    return v
-end
-
-local function writeFlag(flagName, value)
-    if not Rayfield then return end
-    Rayfield.Flags = Rayfield.Flags or {}
-    Rayfield.Flags[flagName] = Rayfield.Flags[flagName] or { Value = value }
-    Rayfield.Flags[flagName].Value = value
-    if type(Rayfield.SaveConfiguration) == "function" then
-        pcall(function() Rayfield:SaveConfiguration() end)
-    end
-end
-
--- Forward declaration for setMacroInfo to avoid nil-call errors from early UI callbacks
-local setMacroInfo
-
--- =========================
--- Event controls
--- =========================
-
-local function findEventRemotes()
-    local rs = game:GetService("ReplicatedStorage")
-    local lf = rs:FindFirstChild("LobbyFolder")
-    local rem = lf and lf:FindFirstChild("Remotes")
-    if not rem then return nil, nil end
-    local boss = rem:FindFirstChild("BossEvent")
-    local play = rem:FindFirstChild("Play")
-    return boss, play
-end
-
-local eventOptions = {"Reaper", "Hollow", "Hunter", "Oni", "Mode"}
-local eventSelectionFlag = "EventJoinSelection"
-local eventEnableFlag = "EventJoinEnabled"
-
-local function fireEventByType(eventType)
-    local bossRemote, playRemote = findEventRemotes()
-    local rs = game:GetService("ReplicatedStorage")
-    local lf = rs:FindFirstChild("LobbyFolder")
-    local rem = lf and lf:FindFirstChild("Remotes")
-    local eventRemote = rem and rem:FindFirstChild("Event")
-
-    if eventType == "Mode" then
-        if not eventRemote or not eventRemote.FireServer then
-            warn("[Event] 'Event' remote missing for Mode")
-            return
-        end
-    else
-        if not bossRemote or not bossRemote.FireServer then
-            warn("[Event] BossEvent remote missing")
-            return
-        end
-    end
-
-    if not playRemote or not playRemote.FireServer then
-        warn("[Event] Play remote missing")
-        return
-    end
-
-    if eventType == "Hunter" or eventType == "Oni" then
-        local demonFlag = (eventType == "Oni")
-        pcall(function()
-            bossRemote:FireServer("Demon Event", demonFlag)
-        end)
-        task.wait(2)
-        local startArgs = {
-            "Start",
-            {
-                AreaNumber = 1,
-                AreaType = "Boss Event"
-            }
-        }
-        pcall(function()
-            playRemote:FireServer(unpack(startArgs))
-        end)
-        return
-    end
-
-    if eventType == "Reaper" or eventType == "Hollow" then
-        local isHollow = (eventType == "Hollow")
-        pcall(function()
-            bossRemote:FireServer("Reaper Event", isHollow)
-        end)
-        task.wait(2)
-        local startArgs = {
-            "Start",
-            {
-                AreaNumber = 1,
-                AreaType = "Boss Event"
-            }
-        }
-        pcall(function()
-            playRemote:FireServer(unpack(startArgs))
-        end)
-        return
-    end
-
-    if eventType == "Mode" then
-        pcall(function()
-            local args = { "Mode" }
-            if eventRemote and eventRemote.FireServer then
-                eventRemote:FireServer(unpack(args))
-            end
-        end)
-        task.wait(2)
-        local startArgs = {
-            "Start",
-            {
-                AreaNumber = 1,
-                AreaType = "Event"
-            }
-        }
-        pcall(function()
-            playRemote:FireServer(unpack(startArgs))
-        end)
-        return
-    end
-end
-
-local eventState = {
-    Reaper = { enabled = false, threadRef = nil, token = nil },
-    Hollow = { enabled = false, threadRef = nil, token = nil },
-    Hunter = { enabled = false, threadRef = nil, token = nil },
-    Oni = { enabled = false, threadRef = nil, token = nil },
-    Mode = { enabled = false, threadRef = nil, token = nil },
-}
-local EVENT_LOOP_DELAY = 6
-
-local function startEventLoop(typeName)
-    local st = eventState[typeName]
-    if not st then return end
-    if st.threadRef then return end
-    st.enabled = true
-    local token = {}
-    st.token = token
-    local thread = spawn(function()
-        while st.enabled and st.token == token do
-            if not st.enabled then break end
-            pcall(function() fireEventByType(typeName) end)
-            if not st.enabled then break end
-            local t0 = tick()
-            while st.enabled and tick() - t0 < EVENT_LOOP_DELAY do
-                task.wait(0.1)
-            end
-        end
-        if st.token == token then
-            st.threadRef = nil
-            st.token = nil
-            st.enabled = false
-        end
-    end)
-    st.threadRef = thread
-end
-
-local function stopEventLoop(typeName)
-    local st = eventState[typeName]
-    if not st then return end
-    st.enabled = false
-    st.token = nil
-    local t0 = tick()
-    local TIMEOUT = 2.0
-    while st.threadRef and tick() - t0 < TIMEOUT do
-        task.wait(0.03)
-    end
-    st.threadRef = nil
-end
-
-local function stopAllEventLoops()
-    for k, _ in pairs(eventState) do
-        stopEventLoop(k)
-    end
-end
-
--- Event tab UI wiring
-if Window and Window.CreateTab then
-    EventTab = Window:CreateTab("Event", 4483362458)
-end
-if EventTab and EventTab.CreateSection then
-    EventSection = EventTab:CreateSection("Event Controls")
-
-    local function normalizeFlagString(flagVal, default)
-        if type(flagVal) == "table" and #flagVal >= 1 and type(flagVal[1]) == "string" then
-            return flagVal[1]
-        elseif type(flagVal) == "string" and flagVal ~= "" then
-            return flagVal
-        else
-            return default
-        end
-    end
-
-    local savedSelection = readFlag(eventSelectionFlag)
-    local initSelection = normalizeFlagString(savedSelection, eventOptions[1])
-
-    local rawEnable = readFlag(eventEnableFlag)
-    local initJoinEvent = false
-    if type(rawEnable) == "boolean" then
-        initJoinEvent = rawEnable
-    elseif type(rawEnable) == "string" then
-        initJoinEvent = (rawEnable == "true")
-    end
-
-    local eventDropdown = nil
-    if EventTab and EventTab.CreateDropdown then
-        eventDropdown = EventTab:CreateDropdown({
-            Name = "Event Type",
-            Options = eventOptions,
-            CurrentOption = { tostring(initSelection) },
-            MultipleOptions = false,
-            Flag = eventSelectionFlag,
-            Callback = function(selection)
-                local sel = selection and selection[1]
-                if sel and sel ~= "" then
-                    writeFlag(eventSelectionFlag, { tostring(sel) })
-                end
-            end
-        })
-    else
-        eventDropdown = { Refresh = function() end, CurrentOption = { tostring(initSelection) } }
-    end
-
-    local joinEventToggle = nil
-    if EventTab and EventTab.CreateToggle then
-        joinEventToggle = EventTab:CreateToggle({
-            Name = "Join Event",
-            CurrentValue = initJoinEvent,
-            Flag = eventEnableFlag,
-            Callback = function(val)
-                writeFlag(eventEnableFlag, (val == true))
-                if not val then
-                    stopAllEventLoops()
-                    return
-                end
-                local sel = (eventDropdown and eventDropdown.CurrentOption and eventDropdown.CurrentOption[1]) or initSelection
-                if not sel or sel == "" then sel = initSelection end
-                stopAllEventLoops()
-                if eventState[sel] then
-                    startEventLoop(sel)
-                    if setMacroInfo then setMacroInfo("Event", ("Joining %s event (auto-loop enabled)"):format(sel), 2.5) end
-                end
-            end
-        })
-    end
-
-    -- RAID SECTION
-    pcall(function()
-        if EventTab and EventTab.CreateDivider then
-            EventTab:CreateDivider()
-        end
-    end)
-
-    local raidEnableFlag = "RaidAutoEnable"
-    local raidDifficultyFlag = "RaidDifficultyFlag"
-    local raidChapterFlag = "RaidChapterFlag"
-
-    local raidDifficultyOptions = {"Normal", "Hard"}
-    local raidChapterOptions = {"1","2","3","4","5","6","7"}
-
-    local function normalizeDropdownFlagLocal(flagVal, default)
-        if type(flagVal) == "table" and #flagVal >= 1 and type(flagVal[1]) == "string" then
-            return flagVal[1]
-        elseif type(flagVal) == "string" and flagVal ~= "" then
-            return flagVal
-        else
-            return default
-        end
-    end
-
-    local savedRaidDiff = readFlag(raidDifficultyFlag)
-    local initRaidDiff = normalizeDropdownFlagLocal(savedRaidDiff, raidDifficultyOptions[1])
-
-    local savedRaidChap = readFlag(raidChapterFlag)
-    local initRaidChap = normalizeDropdownFlagLocal(savedRaidChap, raidChapterOptions[1])
-
-    local savedRaidEnable = readFlag(raidEnableFlag)
-    local initRaidEnable = false
-    if type(savedRaidEnable) == "boolean" then initRaidEnable = savedRaidEnable
-    elseif type(savedRaidEnable) == "string" then initRaidEnable = (savedRaidEnable == "true") end
-
-    local raidDifficultyDropdown = nil
-    if EventTab and EventTab.CreateDropdown then
-        raidDifficultyDropdown = EventTab:CreateDropdown({
-            Name = "Raid Difficulty",
-            Options = raidDifficultyOptions,
-            CurrentOption = { tostring(initRaidDiff) },
-            MultipleOptions = false,
-            Flag = raidDifficultyFlag,
-            Callback = function(selection)
-                local sel = selection and selection[1]
-                if sel and sel ~= "" then
-                    writeFlag(raidDifficultyFlag, { tostring(sel) })
-                end
-            end
-        })
-    else
-        raidDifficultyDropdown = { CurrentOption = { tostring(initRaidDiff) } }
-    end
-
-    local raidChapterDropdown = nil
-    if EventTab and EventTab.CreateDropdown then
-        raidChapterDropdown = EventTab:CreateDropdown({
-            Name = "Raid Chapter",
-            Options = raidChapterOptions,
-            CurrentOption = { tostring(initRaidChap) },
-            MultipleOptions = false,
-            Flag = raidChapterFlag,
-            Callback = function(selection)
-                local sel = selection and selection[1]
-                if sel and sel ~= "" then
-                    writeFlag(raidChapterFlag, { tostring(sel) })
-                end
-            end
-        })
-    else
-        raidChapterDropdown = { CurrentOption = { tostring(initRaidChap) } }
-    end
-
-    local raidThread = nil
-    local raidEnabled = false
-
-    local function startRaidLoop()
-        if raidThread then return end
-        raidEnabled = true
-        raidThread = spawn(function()
-            while raidEnabled do
-                local diffRaw = (raidDifficultyDropdown and raidDifficultyDropdown.CurrentOption and raidDifficultyDropdown.CurrentOption[1]) or initRaidDiff
-                local chapRaw = (raidChapterDropdown and raidChapterDropdown.CurrentOption and raidChapterDropdown.CurrentOption[1]) or initRaidChap
-                local difficulty = tostring(diffRaw or raidDifficultyOptions[1])
-                local chapter = tonumber(chapRaw) or 1
-                local hardmode = (difficulty:lower() == "hard")
-
-                local playRemote = nil
-                pcall(function()
-                    local rs = game:GetService("ReplicatedStorage")
-                    local lf = rs:FindFirstChild("LobbyFolder")
-                    local rem = lf and lf:FindFirstChild("Remotes")
-                    playRemote = rem and rem:FindFirstChild("Play")
-                end)
-
-                if playRemote and playRemote.FireServer then
-                    pcall(function()
-                        local args = {
-                            "Join",
-                            {
-                                AreaType = "Raid",
-                                AreaNumber = 3
-                            }
-                        }
-                        playRemote:FireServer(unpack(args))
-                    end)
-
-                    task.wait(0.6)
-
-                    pcall(function()
-                        local args = {
-                            "Update",
-                            {
-                                Chapter = chapter,
-                                Ultramode = false,
-                                Hardmode = hardmode,
-                                Owner = Players.LocalPlayer,
-                                FriendsOnly = true,
-                                WorldNumber = 11,
-                                AreaType = "Raid",
-                                Timer = 7,
-                                AreaNumber = 3,
-                                Players = {}
-                            }
-                        }
-                        playRemote:FireServer(unpack(args))
-                    end)
-
-                    task.wait(0.45)
-
-                    pcall(function()
-                        local args = {
-                            "Start",
-                            {
-                                AreaNumber = 3,
-                                AreaType = "Raid"
-                            }
-                        }
-                        playRemote:FireServer(unpack(args))
-                    end)
-                end
-
-                local cooldown = 6.0
-                local t0 = tick()
-                while raidEnabled and tick() - t0 < cooldown do
-                    task.wait(0.12)
-                end
-            end
-            raidThread = nil
-            pcall(function() if raidToggle then raidToggle.CurrentValue = false end end)
-        end)
-    end
-
-    local function stopRaidLoop()
-        raidEnabled = false
-        local t0 = tick()
-        local TIMEOUT = 2.0
-        while raidThread and tick() - t0 < TIMEOUT do
-            task.wait(0.03)
-        end
-        raidThread = nil
-        pcall(function() if raidToggle then raidToggle.CurrentValue = false end end)
-    end
-
-    local raidToggle = nil
-    if EventTab and EventTab.CreateToggle then
-        raidToggle = EventTab:CreateToggle({
-            Name = "Auto Raid",
-            CurrentValue = initRaidEnable,
-            Flag = raidEnableFlag,
-            Callback = function(val)
-                writeFlag(raidEnableFlag, (val == true))
-                if val then
-                    startRaidLoop()
-                else
-                    stopRaidLoop()
-                end
-            end
-        })
-    end
-
-    pcall(function()
-        writeFlag(raidDifficultyFlag, { tostring(initRaidDiff) })
-        writeFlag(raidChapterFlag, { tostring(initRaidChap) })
-        writeFlag(raidEnableFlag, initRaidEnable)
-        if type(Rayfield.SaveConfiguration) == "function" then
-            pcall(function() Rayfield:SaveConfiguration() end)
-        end
-    end)
-
-    if initJoinEvent then
-        startEventLoop(initSelection or eventOptions[1])
-    end
-end
-
--- =========================
--- ReplicaModule and remotes
--- =========================
-local ReplicaModule = nil
-local store = nil
-if main and main.Modules and main.Modules:FindFirstChild("ReplicaModule") then
-    local ok, rm = pcall(function() return require(main.Modules.ReplicaModule) end)
-    if ok and rm and rm.ReplicaStore then
-        ReplicaModule = rm
-        pcall(function() store = ReplicaModule.ReplicaStore.Get(player) end)
-    end
-end
-
-local remotesFolder = defense and defense:FindFirstChild("Remotes")
-local UnitPlaceRemote = remotesFolder and remotesFolder:FindFirstChild("UnitPlace")
-
--- file name for saving macros
-local MACRO_FILE = "placement_macros.json"
-
-local canWrite = type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function"
-local function saveToDisk(filename, content)
-    if canWrite then
-        pcall(function() writefile(filename, content) end)
-        return true
-    else
-        return false
-    end
-end
-local function loadFromDisk(filename)
-    if canWrite and isfile(filename) then
-        return readfile(filename)
-    else
-        return nil
-    end
-end
-
--- CFrame serialization helpers
-local function cframeToTable(cf)
-    if not cf then return nil end
-    return {
-        position = {cf.X, cf.Y, cf.Z},
-        rightVector = {cf.RightVector.X, cf.RightVector.Y, cf.RightVector.Z},
-        upVector = {cf.UpVector.X, cf.UpVector.Y, cf.UpVector.Z},
-    }
-end
-local function tableToCFrame(t)
-    if not t or not t.position then return nil end
-    local p = t.position
-    local rv = t.rightVector
-    local uv = t.upVector
-    if rv and uv then
-        return CFrame.fromMatrix(Vector3.new(p[1], p[2], p[3]),
-            Vector3.new(rv[1], rv[2], rv[3]),
-            Vector3.new(uv[1], uv[2], uv[3]))
-    else
-        return CFrame.new(p[1], p[2], p[3])
-    end
-end
-
--- macros table
-local macros = {}
-
-local function loadMacros()
-    local raw = loadFromDisk(MACRO_FILE)
-    if raw then
-        local ok, data = pcall(function() return HttpService:JSONDecode(raw) end)
-        if ok and type(data) == "table" then
-            macros = data
-            return true
-        end
-    end
-    if Rayfield and Rayfield.Flags and Rayfield.Flags["__placement_macros_json"] then
-        local raw2 = Rayfield.Flags["__placement_macros_json"].Value
-        if raw2 and raw2 ~= "" then
-            local ok2, data2 = pcall(function() return HttpService:JSONDecode(raw2) end)
-            if ok2 and type(data2) == "table" then
-                macros = data2
-                return true
+    table.sort(MacroNames)
+    if MacroDropdown then
+        MacroDropdown:Refresh(MacroNames)
+        if not CurrentMacro or not Macros[CurrentMacro] then
+            CurrentMacro = MacroNames[1]
+            if CurrentMacro then
+                MacroDropdown:Set(CurrentMacro)
             end
         end
     end
-    macros = {}
-    return false
 end
 
-local function saveMacros()
-    local raw = HttpService:JSONEncode(macros)
-    if saveToDisk(MACRO_FILE, raw) then return true end
-    if Rayfield and Rayfield.Flags then
-        pcall(function()
-            Rayfield.Flags["__placement_macros_json"] = Rayfield.Flags["__placement_macros_json"] or {Value = ""}
-            Rayfield.Flags["__placement_macros_json"].Value = raw
-            if type(Rayfield.SaveConfiguration) == "function" then Rayfield:SaveConfiguration() end
-        end)
-        return true
-    end
-    return false
-end
-
-local function macroNamesList()
-    local t = {}
-    for name, _ in pairs(macros) do table.insert(t, name) end
-    table.sort(t)
-    return t
-end
-
--- GUID lookup
-local GUID_KEYS = {"GUID_Info", "GUID", "GUIDInfo", "GUIDId"}
-
-local guidLookup = {}
-local equippedHotbar = {}
-local function buildHotbarLookup()
-    guidLookup = {}
-    equippedHotbar = {}
-    if not store then return end
-
-    local hotbar = nil
-    local units = nil
-    pcall(function() units = store.Data.Units end)
-    units = units or {}
-    pcall(function() hotbar = store.Data.UnitHotbar end)
-    hotbar = hotbar or {}
-
-    for _, u in ipairs(units) do
-        local id
-        for _, key in ipairs(GUID_KEYS) do
-            if u[key] then
-                id = u[key]
-                break
-            end
-        end
-        if id then
-            guidLookup[id] = u
-        end
-    end
-
-    for slotIndex = 1, #hotbar do
-        local id = hotbar[slotIndex]
-        if id and id ~= "" then
-            table.insert(equippedHotbar, {
-                slot = slotIndex,
-                guid = id,
-                unit = guidLookup[id]
-            })
-        end
-    end
-end
-
-local function findGUIDForUnitName(name)
-    if not name then return nil end
-    for _, e in ipairs(equippedHotbar) do
-        if e.unit and e.unit.Name == name and e.guid and e.guid ~= "" then
-            return e.guid
-        end
-    end
-    for guid, unit in pairs(guidLookup) do
-        if unit and unit.Name == name then
-            return guid
-        end
-    end
-    if not store then return nil end
-    local units = nil
-    pcall(function() units = store.Data.Units end)
-    units = units or {}
-    for _, u in ipairs(units) do
-        if u.Name == name then
-            for _, key in ipairs(GUID_KEYS) do
-                if u[key] and type(u[key]) == "string" and u[key] ~= "" then
-                    return u[key]
-                end
-            end
-        end
-    end
-    return nil
-end
-
--- -------------------------
--- Recording helpers
--- -------------------------
-local recorded = {}
-local recording = false
-local recordConn = nil
-local recordedKeys = {}
-local recordedInstances = {}
-local recordedDedupe = {}
-
-local function round(n, decimals)
-    decimals = decimals or 2
-    local mult = 10 ^ decimals
-    return math.floor(n * mult + 0.5) / mult
-end
-
-local function extractGUIDFromModel(model)
-    if not model then return nil end
-    local attempts = 8
-    for attempt = 1, attempts do
-        if model.GetAttribute then
-            local attrNames = {"GUID", "GUID_Info", "GUIDInfo", "GUID_Id", "GUIDId"}
-            for _, an in ipairs(attrNames) do
-                local ok, a = pcall(function() return model:GetAttribute(an) end)
-                if ok and a and type(a) == "string" and a:match("%w") then
-                    return a
-                end
-            end
-        end
-
-        for _, child in ipairs(model:GetDescendants()) do
-            if child:IsA("StringValue") then
-                local n = child.Name
-                if n == "GUID" or n == "GUID_Info" or n == "GUIDInfo" or n == "GUIDId" then
-                    if child.Value and child.Value ~= "" then
-                        return child.Value
-                    end
-                end
-            end
-        end
-
-        for _, child in ipairs(model:GetDescendants()) do
-            if (child:IsA("ObjectValue") or child:IsA("ValueBase")) and child.Name and child.Name:lower():find("guid") then
-                local ok, v = pcall(function() return tostring(child.Value) end)
-                if ok and v and v ~= "" then
-                    return v
-                end
-            end
-        end
-
-        for _, d in ipairs(model:GetDescendants()) do
-            if d.Name and d.Name:match("{%x+%-%x+%-%x+%-%x+%-%x+}") then
-                return d.Name:match("({%x+%-%x+%-%x+%-%x+%-%x+})")
-            end
-        end
-
-        task.wait(0.08)
-    end
-    return nil
-end
-
-local function waitForHRP(model, timeout)
-    local hrp = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
-    local waited = 0
-    timeout = timeout or 1.5
-    while not hrp and waited < timeout do
-        task.wait(0.06)
-        waited = waited + 0.06
-        hrp = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
-    end
-    return hrp
-end
-
-local STABILITY_SAMPLE_TIME = 0.28
-local STABILITY_CHECK_INTERVAL = 0.07
-local STABILITY_THRESHOLD = 0.35
-
-local function isModelStable(hrp)
-    if not hrp or not hrp:IsA("BasePart") then return false end
-    local samples = math.max(1, math.floor(STABILITY_SAMPLE_TIME / STABILITY_CHECK_INTERVAL))
-    local lastPos = hrp.Position
-    for i = 1, samples do
-        task.wait(STABILITY_CHECK_INTERVAL)
-        if not hrp.Parent then return false end
-        local p = hrp.Position
-        if (p - lastPos).Magnitude > STABILITY_THRESHOLD then
-            lastPos = p
-        end
-    end
-    local p1 = hrp.Position
-    task.wait(0.06)
-    local p2 = hrp.Position
-    return (p1 - p2).Magnitude <= STABILITY_THRESHOLD
-end
-
-local function makeDedupeKey_HRP(unitName, cf, guid)
-    if guid and guid ~= "" then
-        return "G:" .. tostring(guid)
-    end
-    if cf and unitName then
-        local p = cf.Position
-        return ("N:%s@%.2f,%.2f,%.2f"):format(unitName, round(p.X,2), round(p.Y,2), round(p.Z,2))
-    end
-    return "UNKNOWN"
-end
-
-local function instanceKeyForModel(model)
-    if not model then return nil end
-    if type(model.GetDebugId) == "function" then
-        local ok, id = pcall(function() return model:GetDebugId() end)
-        if ok and id then return "I:" .. tostring(id) end
-    end
-    return "I:" .. tostring(model)
-end
-
--- recordPlacementIfStable: ignores cursor/preview models by ensuring model is descendant of Units
-local function recordPlacementIfStable(model)
-    if not model or not model:IsA("Model") then return nil end
-    local name = model.Name
-    if not name or name == "" then return nil end
-
-    local unitsFolder = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Units")
-    if not unitsFolder then return nil end
-    if not model:IsDescendantOf(unitsFolder) then
-        return nil
-    end
-
-    local isPreview = false
-    pcall(function()
-        if model.GetAttribute then
-            local ok1, v1 = pcall(function() return model:GetAttribute("IsPreview") end)
-            if ok1 and v1 then isPreview = true end
-            local ok2, v2 = pcall(function() return model:GetAttribute("Preview") end)
-            if ok2 and v2 then isPreview = true end
-            local ok3, v3 = pcall(function() return model:GetAttribute("Cursor") end)
-            if ok3 and v3 then isPreview = true end
-                  end
-        end)
-    end)
-    if isPreview then
-        return nil
-    end
-
-    local hrp = waitForHRP(model, 1.5)
-    if not hrp then return nil end
-
-    local stable = isModelStable(hrp)
-    if not stable then
-        return nil
-    end
-
-    local guid = extractGUIDFromModel(model)
-    local cf = hrp.CFrame
-
-    local dedupeKey = makeDedupeKey_HRP(name, cf, guid)
-    recordedDedupe = recordedDedupe or {}
-    if recordedDedupe[dedupeKey] then
-        return nil
-    end
-
-    table.insert(recorded, { unitName = name, cframe = cframeToTable(cf), guid = guid })
-    recordedDedupe[dedupeKey] = true
-
-    return dedupeKey
-end
-
--- Recording UI (minimal, popups silenced by setMacroInfo override later)
-local recordingGui = nil
-local recordingIndicator = nil
-local recordingText = nil
-
-local function createRecordingStatusGui()
-    local parent = CoreGui
-    local ok, test = pcall(function() return CoreGui end)
-    if not ok or not parent then
-        parent = player:FindFirstChild("PlayerGui") or player:WaitForChild("PlayerGui")
-    end
-
-    pcall(function()
-        local old = parent:FindFirstChild("PlacementRecordingStatus")
-        if old then old:Destroy() end
-    end)
-
-    recordingGui = Instance.new("ScreenGui")
-    recordingGui.Name = "PlacementRecordingStatus"
-    recordingGui.ResetOnSpawn = false
-    recordingGui.Parent = parent
-
-    local frame = Instance.new("Frame")
-    frame.Name = "RecordFrame"
-    frame.Parent = recordingGui
-    frame.AnchorPoint = Vector2.new(0, 0)
-    frame.Position = UDim2.new(0.01, 0, 0.02, 0)
-    frame.Size = UDim2.new(0, 160, 0, 36)
-    frame.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-    frame.BackgroundTransparency = 0.15
-    frame.BorderSizePixel = 0
-    frame.ZIndex = 9999
-    frame.ClipsDescendants = true
-    frame.Visible = false
-
-    recordingIndicator = Instance.new("Frame")
-    recordingIndicator.Name = "Indicator"
-    recordingIndicator.Parent = frame
-    recordingIndicator.AnchorPoint = Vector2.new(0, 0.5)
-    recordingIndicator.Position = UDim2.new(0, 8, 0.5, 0)
-    recordingIndicator.Size = UDim2.new(0, 24, 0, 24)
-    recordingIndicator.BackgroundColor3 = Color3.fromRGB(200, 30, 30)
-    recordingIndicator.BorderSizePixel = 0
-    recordingIndicator.ZIndex = 10000
-    recordingIndicator.Visible = true
-    recordingIndicator.BackgroundTransparency = 0
-
-    local uiCorner = Instance.new("UICorner", recordingIndicator)
-    uiCorner.CornerRadius = UDim.new(0, 6)
-
-    recordingText = Instance.new("TextLabel")
-    recordingText.Name = "RecordText"
-    recordingText.Parent = frame
-    recordingText.AnchorPoint = Vector2.new(0, 0.5)
-    recordingText.Position = UDim2.new(0, 44, 0.5, 0)
-    recordingText.Size = UDim2.new(1, -52, 0, 24)
-    recordingText.BackgroundTransparency = 1
-    recordingText.Text = "Recording..."
-    recordingText.TextColor3 = Color3.new(1, 1, 1)
-    recordingText.TextScaled = true
-    recordingText.Font = Enum.Font.SourceSansBold
-    recordingText.TextXAlignment = Enum.TextXAlignment.Left
-    recordingText.ZIndex = 10000
-
-    spawn(function()
-        while recordingGui and recordingGui.Parent do
-            if recordingGui.RecordFrame.Visible then
-                for i = 1, 20 do
-                    if not recordingGui or not recordingGui.Parent then break end
-                    local t = i / 20
-                    pcall(function() recordingIndicator.BackgroundTransparency = 0.2 + 0.6 * (1 - math.abs(2 * t - 1)) end)
-                    task.wait(0.03)
-                end
-            else
-                task.wait(0.25)
-            end
-        end
-    end)
-end
-
-local function showRecordingStatus(on)
-    if not recordingGui then
-        pcall(createRecordingStatusGui)
-    end
-    if not recordingGui then return end
-    pcall(function()
-        recordingGui.RecordFrame.Visible = on and true or false
-    end)
-end
-
--- Info popup (will be silenced by setMacroInfo override if SILENCE_OUTPUTS)
-local infoPopupGui = nil
-local function createInfoPopupGui()
-    local parent = CoreGui
-    local ok, test = pcall(function() return CoreGui end)
-    if not ok or not parent then
-        parent = player:FindFirstChild("PlayerGui") or player:WaitForChild("PlayerGui")
-    end
-
-    pcall(function()
-        local old = parent:FindFirstChild("PlacementInfoPopup")
-        if old then old:Destroy() end
-    end)
-
-    infoPopupGui = Instance.new("ScreenGui")
-    infoPopupGui.Name = "PlacementInfoPopup"
-    infoPopupGui.ResetOnSpawn = false
-    infoPopupGui.Parent = parent
-
-    local frame = Instance.new("Frame")
-    frame.Name = "PopupFrame"
-    frame.Parent = infoPopupGui
-    frame.AnchorPoint = Vector2.new(0.5, 0)
-    frame.Position = UDim2.new(0.5, 0, 0.02, 0)
-    frame.Size = UDim2.new(0, 520, 0, 64)
-    frame.BackgroundColor3 = Color3.fromRGB(28, 28, 28)
-    frame.BackgroundTransparency = 0.06
-    frame.BorderSizePixel = 0
-    frame.ZIndex = 10050
-    frame.Visible = false
-
-    local shadow = Instance.new("Frame")
-    shadow.Name = "Shadow"
-    shadow.Parent = infoPopupGui
-    shadow.AnchorPoint = frame.AnchorPoint
-    shadow.Position = frame.Position + UDim2.new(0, 4, 0, 6)
-    shadow.Size = frame.Size
-    shadow.BackgroundColor3 = Color3.fromRGB(0,0,0)
-    shadow.BackgroundTransparency = 0.6
-    shadow.BorderSizePixel = 0
-    shadow.ZIndex = frame.ZIndex - 1
-    shadow.Visible = false
-
-    local uiCorner = Instance.new("UICorner", frame)
-    uiCorner.CornerRadius = UDim.new(0, 8)
-
-    local title = Instance.new("TextLabel")
-    title.Name = "Title"
-    title.Parent = frame
-    title.AnchorPoint = Vector2.new(0, 0)
-    title.Position = UDim2.new(0, 12, 0, 8)
-    title.Size = UDim2.new(1, -24, 0, 24)
-    title.BackgroundTransparency = 1
-    title.Text = ""
-    title.TextColor3 = Color3.fromRGB(235, 235, 235)
-    title.Font = Enum.Font.SourceSansBold
-    title.TextSize = 18
-    title.TextXAlignment = Enum.TextXAlignment.Left
-    title.TextYAlignment = Enum.TextYAlignment.Top
-    title.ZIndex = frame.ZIndex + 1
-
-    local content = Instance.new("TextLabel")
-    content.Name = "Content"
-    content.Parent = frame
-    content.AnchorPoint = Vector2.new(0, 0)
-    content.Position = UDim2.new(0, 12, 0, 32)
-    content.Size = UDim2.new(1, -24, 0, 24)
-    content.BackgroundTransparency = 1
-    content.Text = ""
-    content.TextColor3 = Color3.fromRGB(210, 210, 210)
-    content.Font = Enum.Font.SourceSans
-    content.TextSize = 15
-    content.TextXAlignment = Enum.TextXAlignment.Left
-    content.TextYAlignment = Enum.TextYAlignment.Top
-    content.TextWrapped = true
-    content.ZIndex = frame.ZIndex + 1
-
-    local titleStroke = Instance.new("UIStroke", title)
-    titleStroke.Color = Color3.fromRGB(0,0,0)
-    titleStroke.Transparency = 0.85
-    titleStroke.Thickness = 1
-
-    frame:GetPropertyChangedSignal("Visible"):Connect(function()
-        if shadow and shadow.Parent then
-            shadow.Visible = frame.Visible
-        end
-    end)
-end
-
-setMacroInfo = function(titleText, contentText, duration)
-    duration = duration or 3.0
-    if not infoPopupGui then
-        pcall(createInfoPopupGui)
-    end
-    if not infoPopupGui then return end
-    pcall(function()
-        local frame = infoPopupGui:FindFirstChild("PopupFrame")
-        local shadow = infoPopupGui:FindFirstChild("Shadow")
-        if not frame then return end
-        local title = frame:FindFirstChild("Title")
-        local content = frame:FindFirstChild("Content")
-        if title then title.Text = tostring(titleText or "") end
-        if content then content.Text = tostring(contentText or "") end
-        frame.Visible = true
-        if shadow then shadow.Visible = true end
-
-        spawn(function()
-            local t0 = tick()
-            while frame and frame.Parent and tick() - t0 < duration do
-                task.wait(0.05)
-            end
-            if frame and frame.Parent then
-                pcall(function() frame.Visible = false end)
-            end
-            if shadow and shadow.Parent then
-                pcall(function() shadow.Visible = false end)
-            end
-        end)
-    end)
-end
-
--- If silence requested, replace setMacroInfo with a no-op so no popups appear
--- If silence requested, replace setMacroInfo with a filtered wrapper
-if SILENCE_OUTPUTS then
-    local original_setMacroInfo = setMacroInfo
-    setMacroInfo = function(titleText, contentText, duration)
-        -- Allow only AutoMaps assignment messages to show
-        local allow = false
-        if titleText == "AutoMaps Assignment" then
-            allow = true
-        else
-            -- fallback: allow messages that explicitly show "Map 'X' -> Macro 'Y'"
-            if type(contentText) == "string" and contentText:match("Map%s+'[^']+'%s+%-%>%s+Macro%s+'[^']+'") then
-                allow = true
-            end
-        end
-
-        if allow then
-            pcall(function() original_setMacroInfo(titleText, contentText, duration) end)
-        end
-    end
-end
-
-
--- -------------------------
--- Recording control functions
--- -------------------------
-local function startRecording()
-    if recording then return end
-    buildHotbarLookup()
-    recorded = {}
-    recordedKeys = {}
-    recordedInstances = {}
-    recordedDedupe = {}
-    recording = true
-    showRecordingStatus(true)
-
-    local unitsFolder = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Units")
-    if not unitsFolder then
-        recording = false
-        showRecordingStatus(false)
-        return
-    end
-
-    for _, child in ipairs(unitsFolder:GetChildren()) do
-        spawn(function()
-            task.wait(0.04)
-            recordPlacementIfStable(child)
-        end)
-    end
-
-    recordConn = unitsFolder.ChildAdded:Connect(function(child)
-        spawn(function()
-            task.wait(0.05)
-            recordPlacementIfStable(child)
-        end)
-    end)
-
-    spawn(function()
-        local SCAN_INTERVAL = 0.45
-        while recording do
-            local ok, children = pcall(function() return (workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Units") and workspace.Map.Units:GetChildren()) or {} end)
-            if ok and children then
-                for _, child in ipairs(children) do
-                    local hrp = child and (child:FindFirstChild("HumanoidRootPart") or child.PrimaryPart)
-                    if child and child:IsA("Model") and hrp then
-                        local guid = extractGUIDFromModel(child)
-                        local key = makeDedupeKey_HRP(child.Name, hrp.CFrame, guid)
-                        if not recordedDedupe[key] then
-                            spawn(function()
-                                pcall(function() recordPlacementIfStable(child) end)
-                            end)
-                        end
-                    end
-                end
-            end
-            local t0 = tick()
-            while recording and tick() - t0 < SCAN_INTERVAL do
-                task.wait(0.05)
-            end
-        end
-    end)
-end
-
-local function stopRecording()
-    if not recording then return end
-    recording = false
-    if recordConn then recordConn:Disconnect() recordConn = nil end
-    showRecordingStatus(false)
-end
-
--- -------------------------
--- Playback helpers
--- -------------------------
-local playbackThread = nil
-local playbackStopFlag = false
-local currentPlaying = nil
-
-local function asyncInvokeRemote(remote, guid, cf, timeout)
-    timeout = timeout or 0.6
-    if playbackStopFlag then return false, "stopped" end
-
-    local finished = false
-    local ok, res = false, nil
-
-    spawn(function()
-        if playbackStopFlag then
-            finished = true
-            ok, res = false, "stopped"
-            return
-        end
-        local s, r = pcall(function() return remote:InvokeServer(guid, cf) end)
-        ok, res = s, r
-        finished = true
-    end)
-
-    local t0 = tick()
-    while not finished and tick() - t0 < timeout do
-        if playbackStopFlag then
-            return false, "stopped"
-        end
-        task.wait(0.03)
-    end
-
-    if not finished then
-        return false, "timeout"
-    end
-
-    if playbackStopFlag then
-        return false, "stopped"
-    end
-
-    return ok, res
-end
-
-local function countModelsNear(name, cf, radius)
-    local folder = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Units")
-    if not folder or not cf then return 0 end
-    local pos = cf.Position
-    local count = 0
-    for _, model in ipairs(folder:GetChildren()) do
-        if model.Name == name then
-            local hrp = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
-            if hrp then
-                if (hrp.Position - pos).Magnitude <= radius then
-                    count = count + 1
-                end
-            end
-        end
-    end
-    return count
-end
-
-local function findNewSpawn(beforeList, unitName, cf, radius, timeout, expectedGuid)
-    timeout = timeout or 1.5
-    local folder = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Units")
-    if not folder or not cf then return nil end
-    local t0 = tick()
-    while tick() - t0 <= timeout do
-        if playbackStopFlag then return nil end
-
-        for _, model in ipairs(folder:GetChildren()) do
-            if model and model:IsA("Model") then
-                local already = false
-                for _, m in ipairs(beforeList) do
-                    if m == model then already = true break end
-                end
-                if not already then
-                    if expectedGuid and expectedGuid ~= "" then
-                        local ok, mguid = pcall(function() return extractGUIDFromModel(model) end)
-                        if ok and mguid and tostring(mguid) == tostring(expectedGuid) then
-                            table.insert(beforeList, model)
-                            return model
-                        end
-                    end
-
-                    if model.Name == unitName then
-                        local hrp = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
-                        if hrp then
-                            local dist = (hrp.Position - cf.Position).Magnitude
-                            if dist <= math.max(radius, 0.6) then
-                                table.insert(beforeList, model)
-                                return model
-                            end
-                        end
-                    end
-                end
-            end
-        end
-        task.wait(0.06)
-    end
-    return nil
-end
-
-local function attemptPlaceUntilSuccess(guid, cf, unitName, recordedStep, beforeList)
-    local SEARCH_RADIUS = 0.18
-    local MAX_ACCEPT_DIST = 0.6
-    local SPAWN_TIMEOUT = 1.8
-    local TOTAL_TIMEOUT = 4.0
-    local INVOKE_TIMEOUT = 0.8
-    local RETRY_DELAY = 0.18
-    local OFFSET_ATTEMPTS = {
-        Vector3.new(0,0,0),
-        Vector3.new(0.35,0,0),
-        Vector3.new(-0.35,0,0),
-        Vector3.new(0,0,0.35),
-        Vector3.new(0,0,-0.35),
-        Vector3.new(0.5,0,0.5),
-        Vector3.new(-0.5,0,-0.5),
-    }
-
-    if not UnitPlaceRemote then return false end
-    local tStart = tick()
-
-    while tick() - tStart <= TOTAL_TIMEOUT and not playbackStopFlag do
-        for _, offset in ipairs(OFFSET_ATTEMPTS) do
-            if playbackStopFlag then return false end
-
-            local tryCf = cf
-            if offset and (offset.X ~= 0 or offset.Y ~= 0 or offset.Z ~= 0) then
-                tryCf = cf * CFrame.new(offset)
-            end
-
-            local okInvoke, invokeErr = asyncInvokeRemote(UnitPlaceRemote, guid, tryCf, INVOKE_TIMEOUT)
-            if invokeErr == "stopped" then return false end
-
-            if not okInvoke then
-                task.wait(RETRY_DELAY)
-            else
-                task.wait(0.12)
-                local spawned = findNewSpawn(beforeList, unitName, tryCf, SEARCH_RADIUS, SPAWN_TIMEOUT, guid)
-                if spawned then
-                    local hrp = spawned:FindFirstChild("HumanoidRootPart") or spawned.PrimaryPart
-                    local dist = (hrp and tryCf) and (hrp.Position - tryCf.Position).Magnitude or math.huge
-                    if dist <= MAX_ACCEPT_DIST then
-                        local newGuid = extractGUIDFromModel(spawned)
-                        if newGuid and recordedStep then
-                            recordedStep.guid = newGuid
-                            pcall(saveMacros)
-                        end
-                        return true
-                    else
-                        task.wait(0.06)
-                    end
-                else
-                    task.wait(RETRY_DELAY)
-                end
-            end
-        end
-
-        if playbackStopFlag then return false end
-        task.wait(0.18)
-    end
-
-    return false
-end
-
-local function isStepPresent(step, radius)
-    radius = radius or 0.9
-    if not step then return false end
-    local cf = tableToCFrame(step.cframe)
-    if not cf then return false end
-
-    if step.guid and step.guid ~= "" then
-        local folder = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Units")
-        if folder then
-            for _, m in ipairs(folder:GetChildren()) do
-                if m and m:IsA("Model") then
-                    local ok, mguid = pcall(function() return extractGUIDFromModel(m) end)
-                    if ok and mguid and tostring(mguid) == tostring(step.guid) then
-                        return true
-                    end
-                end
-            end
-        end
-    end
-
-    if countModelsNear(step.unitName, cf, radius) > 0 then
-        return true
-    end
-
-    return false
-end
-
-local function playMacroOnceStrict(name)
-    local macro = macros[name]
-    if not macro or not macro.steps or #macro.steps == 0 then return end
-
-    local folder = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Units")
-    local seenModels = {}
-    if folder then
-        for _, m in ipairs(folder:GetChildren()) do
-            table.insert(seenModels, m)
-        end
-    end
-
-    local startIndex = #macro.steps + 1
-    for i, step in ipairs(macro.steps) do
-        if not isStepPresent(step, 0.9) then
-            startIndex = i
-            break
-        else
-            pcall(function()
-                local cf = tableToCFrame(step.cframe)
-                if cf and folder then
-                    for _, m in ipairs(folder:GetChildren()) do
-                        if m and m:IsA("Model") then
-                            local hrp = m:FindFirstChild("HumanoidRootPart") or m.PrimaryPart
-                            if hrp and (hrp.Position - cf.Position).Magnitude <= 0.9 then
-                                table.insert(seenModels, m)
-                                break
-                            end
-                        end
-                    end
-                end
-            end)
-        end
-    end
-
-    if startIndex > #macro.steps then
-        -- silenced: setMacroInfo overridden when SILENCE_OUTPUTS = true
-        setMacroInfo("Playback", ("Macro '%s' already present; nothing to place"):format(name), 2.5)
-        return
-    end
-
-    for i = startIndex, #macro.steps do
-        if playbackStopFlag then return end
-        local step = macro.steps[i]
-        if isStepPresent(step, 0.9) then
-            pcall(function()
-                local cf = tableToCFrame(step.cframe)
-                if cf and folder then
-                    for _, m in ipairs(folder:GetChildren()) do
-                        if m and m:IsA("Model") then
-                            local hrp = m:FindFirstChild("HumanoidRootPart") or m.PrimaryPart
-                            if hrp and (hrp.Position - cf.Position).Magnitude <= 0.9 then
-                                table.insert(seenModels, m)
-                                break
-                            end
-                        end
-                    end
-                end
-            end)
-        else
-            local guid = step.guid or findGUIDForUnitName(step.unitName)
-            local cf = tableToCFrame(step.cframe)
-            if guid and cf then
-                local placed = attemptPlaceUntilSuccess(guid, cf, step.unitName, step, seenModels)
-                if placed then
-                    pcall(function()
-                        local folder2 = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Units")
-                        if folder2 then
-                            for _, m in ipairs(folder2:GetChildren()) do
-                                if m and m:IsA("Model") then
-                                    local hrp = m:FindFirstChild("HumanoidRootPart") or m.PrimaryPart
-                                    if hrp and (hrp.Position - cf.Position).Magnitude <= 0.9 then
-                                        table.insert(seenModels, m)
-                                        break
-                                    end
-                                end
-                            end
-                        end
-                    end)
-                end
-            end
-        end
-    end
-
-    local function verifyAndRetryStep(index, step)
-        if playbackStopFlag then return end
-        local cf = tableToCFrame(step.cframe)
-        if not cf then return end
-
-        local expectedGuid = step.guid
-        local found = false
-        if expectedGuid and expectedGuid ~= "" then
-            local folder2 = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Units")
-            if folder2 then
-                for _, m in ipairs(folder2:GetChildren()) do
-                    if m and m:IsA("Model") then
-                        local ok, mguid = pcall(function() return extractGUIDFromModel(m) end)
-                        if ok and mguid and tostring(mguid) == tostring(expectedGuid) then
-                            found = true
-                            break
-                        end
-                    end
-                end
-            end
-        end
-
-        if not found then
-            if countModelsNear(step.unitName, cf, 0.9) > 0 then
-                found = true
-            end
-        end
-
-        if not found then
-            setMacroInfo("Playback", ("Verifying step %d/%d: '%s' missing — retrying"):format(index, #macro.steps, tostring(step.unitName)), 2.0)
-            while not playbackStopFlag do
-                local retryGuid = step.guid or findGUIDForUnitName(step.unitName)
-                if not retryGuid then break end
-                local ok = attemptPlaceUntilSuccess(retryGuid, cf, step.unitName, step, seenModels)
-                if ok then
-                    task.wait(0.18)
-                    local recheckFound = false
-                    if step.guid and step.guid ~= "" then
-                        local folder3 = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Units")
-                        if folder3 then
-                            for _, m in ipairs(folder3:GetChildren()) do
-                                if m and m:IsA("Model") then
-                                    local ok2, mguid2 = pcall(function() return extractGUIDFromModel(m) end)
-                                    if ok2 and mguid2 and tostring(mguid2) == tostring(step.guid) then
-                                        recheckFound = true
-                                        break
-                                    end
-                                end
-                            end
-                        end
-                    end
-                    if not recheckFound and countModelsNear(step.unitName, cf, 0.9) > 0 then
-                        recheckFound = true
-                    end
-                    if recheckFound then break end
-                    task.wait(0.6)
-                else
-                    if playbackStopFlag then return end
-                    task.wait(0.6)
-                end
-            end
-        end
-    end
-
-    for i, step in ipairs(macro.steps) do
-        if playbackStopFlag then return end
-        verifyAndRetryStep(i, step)
-    end
-
-    local missing = {}
-    for i, step in ipairs(macro.steps) do
-        local cf = tableToCFrame(step.cframe)
-        local okFound = false
-        if cf then
-            if step.guid and step.guid ~= "" then
-                local folder4 = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Units")
-                if folder4 then
-                    for _, m in ipairs(folder4:GetChildren()) do
-                        if m and m:IsA("Model") then
-                            local ok2, mg = pcall(function() return extractGUIDFromModel(m) end)
-                            if ok2 and mg and tostring(mg) == tostring(step.guid) then okFound = true break end
-                        end
-                    end
-                end
-            end
-            if not okFound and countModelsNear(step.unitName, cf, 0.9) > 0 then okFound = true end
-        end
-        if not okFound then table.insert(missing, i) end
-    end
-
-    if #missing == 0 then
-        setMacroInfo("Playback", ("Macro '%s' completed: all steps placed"):format(name), 3.0)
-    else
-        setMacroInfo("Playback", ("Macro '%s' finished: %d missing steps"):format(name, #missing), 4.0)
-    end
-end
-
-local function startPlayback(name, repeatPlay)
-    if playbackThread then return end
-    buildHotbarLookup()
-    playbackStopFlag = false
-    currentPlaying = name
-    local threadToken = {}
-    playbackThread = threadToken
-
-    spawn(function()
-        if repeatPlay then
-            while not playbackStopFlag and macros[name] do
-                if playbackThread ~= threadToken then break end
-                playMacroOnceStrict(name)
-                if playbackStopFlag then break end
-                local t0 = tick()
-                while not playbackStopFlag and tick() - t0 < 0.18 do task.wait(0.03) end
-            end
-        else
-            if not playbackStopFlag and macros[name] then
-                playMacroOnceStrict(name)
-            end
-        end
-
-        if playbackThread == threadToken then
-            playbackThread = nil
-            playbackStopFlag = false
-            currentPlaying = nil
-            pcall(function()
-                if playToggle then playToggle.CurrentValue = false end
-            end)
-        end
-    end)
-end
-
-local function stopPlayback()
-    playbackStopFlag = true
-    if not playbackThread then
-        playbackStopFlag = false
-        currentPlaying = nil
-        pcall(function() if playToggle then playToggle.CurrentValue = false end end)
-        return
-    end
-    local t0 = tick()
-    local WAIT_TIMEOUT = 3.0
-    while playbackThread and tick() - t0 < WAIT_TIMEOUT do
-        task.wait(0.03)
-    end
-    playbackThread = nil
-    playbackStopFlag = false
-    currentPlaying = nil
-    pcall(function() if playToggle then playToggle.CurrentValue = false end end)
-end
-
--- =========================
--- AutoUpgrade (kept functional, outputs silenced)
--- =========================
-local function findUnitReplicaStore_Debug()
-    if not ReplicaModule then
-        local candidates = {
-            ReplicatedStorage:FindFirstChild("UnitReplica"),
-            ReplicatedStorage:FindFirstChild("UnitData"),
-            ReplicatedStorage:FindFirstChild("Units"),
-            ReplicatedStorage:FindFirstChild("ModelReplica"),
-            ReplicatedStorage:FindFirstChild("UnitReplicas"),
-        }
-        for _, cand in ipairs(candidates) do
-            if cand then
-                return cand
-            end
-        end
-        return nil
-    end
-
-    local storeObj = ReplicaModule.ReplicaStore
-    if storeObj then
-        local LIKELY_STORE_NAMES = {"UnitReplica", "UnitData", "Units", "ModelReplica", "UnitReplicas"}
-        for _, name in ipairs(LIKELY_STORE_NAMES) do
-            local ok, s = pcall(function() return storeObj.Get(name) end)
-            if ok and s then
-                return s
-            end
-        end
-        return storeObj
-    end
-    return nil
-end
-
-local function detectReplicaKeys_Debug()
-    local storeCandidate = findUnitReplicaStore_Debug()
-    if not storeCandidate then return {} end
-    local keys = {}
-    local function addKey(k)
-        if not k then return end
-        local s = tostring(k)
-        if s == "" then return end
-        if not keys[s] then keys[s] = true end
-    end
-
-    if storeCandidate.Children and type(storeCandidate.Children) == "table" then
-        for _, rep in ipairs(storeCandidate.Children) do
-            if rep then
-                local ok, id = pcall(function() return rep.Id end)
-                if ok and id and tostring(id) ~= "" then addKey(id) end
-                ok, id = pcall(function() return rep.Data and (rep.Data.InstanceId or rep.Data.InstanceGUID or rep.Data.GUID or rep.Data.GUID_Info) end)
-                if ok and id and tostring(id) ~= "" then addKey(id) end
-            end
-        end
-    end
-
-    if storeCandidate.GetAll and type(storeCandidate.GetAll) == "function" then
-        local ok, all = pcall(function() return storeCandidate:GetAll() end)
-        if ok and type(all) == "table" then
-            for _, rep in ipairs(all) do
-                if rep then
-                    local ok2, id2 = pcall(function() return rep.Id end)
-                    if ok2 and id2 and tostring(id2) ~= "" then addKey(id2) end
-                    ok2, id2 = pcall(function() return rep.Data and (rep.Data.InstanceId or rep.Data.InstanceGUID or rep.Data.GUID or rep.Data.GUID_Info) end)
-                    if ok2 and id2 and tostring(id2) ~= "" then addKey(id2) end
-                end
-            end
-        end
-    end
-
-    for i = 1, 500 do
-        local ok, rep = pcall(function() return storeCandidate[i] end)
-        if not ok or not rep then break end
-        local ok2, id2 = pcall(function() return rep.Id end)
-        if ok2 and id2 and tostring(id2) ~= "" then addKey(id2) end
-        ok2, id2 = pcall(function() return rep.Data and (rep.Data.InstanceId or rep.Data.InstanceGUID or rep.Data.GUID or rep.Data.GUID_Info) end)
-        if ok2 and id2 and tostring(id2) ~= "" then addKey(id2) end
-    end
-
-    local list = {}
-    for k, _ in pairs(keys) do table.insert(list, k) end
-    table.sort(list, function(a,b)
-        local na, nb = tonumber(a), tonumber(b)
-        if na and nb then return na < nb end
-        return a < b
-    end)
-    return list
-end
-
-local autoUpgradeEnabled = false
-local autoUpgradeThread = nil
-local autoUpgradeCachedKeys = {}
-local autoUpgradeCacheTime = 0
-local AUTOUPGRADE_CACHE_TTL = 3.0
-local AUTOUPGRADE_WAIT_PER_KEY = 0.5
-
-local function startAutoUpgrade_Debug()
-    if autoUpgradeThread then return end
-    autoUpgradeEnabled = true
-    autoUpgradeThread = spawn(function()
-        local rre = ReplicatedStorage:FindFirstChild("ReplicaRemoteEvents")
-        local remote = rre and rre:FindFirstChild("Replica_ReplicaSignal")
-        if not remote then
-            autoUpgradeEnabled = false
-            autoUpgradeThread = nil
-            pcall(function() if autoUpgradeToggle then autoUpgradeToggle.CurrentValue = false end end)
-            return
-        end
-
-        local keyIndex = 1
-        while autoUpgradeEnabled do
-            local now = tick()
-            if (now - autoUpgradeCacheTime) > AUTOUPGRADE_CACHE_TTL or #autoUpgradeCachedKeys == 0 then
-                local ok, keys = pcall(detectReplicaKeys_Debug)
-                if ok and keys and #keys > 0 then
-                    autoUpgradeCachedKeys = keys
-                    autoUpgradeCacheTime = now
-                else
-                    autoUpgradeCachedKeys = {}
-                    autoUpgradeCacheTime = now
-                end
-                keyIndex = 1
-            end
-
-            local currentKey = nil
-            if #autoUpgradeCachedKeys > 0 then
-                if keyIndex > #autoUpgradeCachedKeys then keyIndex = 1 end
-                currentKey = autoUpgradeCachedKeys[keyIndex]
-                keyIndex = keyIndex + 1
-            end
-
-            local arg1 = 12
-            if currentKey and tostring(currentKey) ~= "" then
-                local n = tonumber(currentKey)
-                if n then arg1 = n else arg1 = currentKey end
-            end
-
-            local args = { arg1, "Upgrade" }
-            pcall(function()
-                remote:FireServer(unpack(args))
-            end)
-
-            local t0 = tick()
-            while autoUpgradeEnabled and tick() - t0 < AUTOUPGRADE_WAIT_PER_KEY do
-                task.wait(0.03)
-            end
-        end
-
-        autoUpgradeThread = nil
-        pcall(function() if autoUpgradeToggle then autoUpgradeToggle.CurrentValue = false end end)
-    end)
-end
-
-local function stopAutoUpgrade_Debug()
-    autoUpgradeEnabled = false
-    local t0 = tick()
-    while autoUpgradeThread and tick() - t0 < 1.0 do
-        task.wait(0.03)
-    end
-    autoUpgradeThread = nil
-    pcall(function() if autoUpgradeToggle then autoUpgradeToggle.CurrentValue = false end end)
-end
-
--- =========================
--- Maps tab: Auto Join Story Map (persistence-friendly)
--- =========================
-local STORY_AREA_MAP = {
-    ["Namek Planet"] = 1,
-    ["Hidden Leaf"] = 2,
-    ["Sabaody Islands"] = 3,
-    ["Hage Village"] = 4,
-    ["Snowy Village"] = 5,
-}
-
-local mapsEnabled = false
-local mapsThread = nil
-
-local defaultStory = "Sabaody Islands"
-local defaultChapter = "1"
-local defaultDifficulty = "Normal"
-local defaultAutoJoin = false
-
-local savedStoryFlag = readFlag("MapsStoryFlag")
-local savedChapterFlag = readFlag("MapsChapterFlag")
-local savedDifficultyFlag = readFlag("MapsDifficultyFlag")
-local savedAutoJoinFlag = readFlag("MapsAutoJoinFlag")
-
-local function normalizeDropdownFlag(flagVal, default)
-    if type(flagVal) == "table" and #flagVal >= 1 and type(flagVal[1]) == "string" then
-        return flagVal[1]
-    elseif type(flagVal) == "string" and flagVal ~= "" then
-        return flagVal
-    else
-        return default
-    end
-end
-
-local initStory = normalizeDropdownFlag(savedStoryFlag, defaultStory)
-local initChapter = normalizeDropdownFlag(savedChapterFlag, defaultChapter)
-local initDifficulty = normalizeDropdownFlag(savedDifficultyFlag, defaultDifficulty)
-local initAutoJoin = defaultAutoJoin
-if type(savedAutoJoinFlag) == "boolean" then
-    initAutoJoin = savedAutoJoinFlag
-elseif type(savedAutoJoinFlag) == "string" then
-    initAutoJoin = (savedAutoJoinFlag == "true")
-end
-
-local function fireJoinAndUpdate(areaNumber, chapterNumber, difficulty)
-    local lf = ReplicatedStorage:FindFirstChild("LobbyFolder")
-    local rem = lf and lf:FindFirstChild("Remotes")
-    local playRemote = rem and rem:FindFirstChild("Play")
-    if not playRemote or not playRemote.FireServer then
-        return false
-    end
-
-    local joinArgs = {
-        [1] = "Join",
-        [2] = {
-            ["AreaType"] = "Story",
-            ["AreaNumber"] = areaNumber,
-        },
-    }
-
-    local hardmode = (tostring(difficulty):lower() == "hard")
-    local updateArgs = {
-        [1] = "Update",
-        [2] = {
-            ["Chapter"] = chapterNumber,
-            ["Ultramode"] = false,
-            ["Hardmode"] = hardmode,
-            ["Owner"] = Players.LocalPlayer,
-            ["FriendsOnly"] = true,
-            ["WorldNumber"] = areaNumber,
-            ["AreaType"] = "Story",
-            ["Timer"] = 15,
-            ["AreaNumber"] = areaNumber,
-            ["Players"] = {},
-        },
-    }
-
-    local startArgs = {
-        [1] = "Start",
-        [2] = {
-            ["AreaNumber"] = areaNumber,
-            ["AreaType"] = "Story",
-        },
-    }
-
-    pcall(function() playRemote:FireServer(table.unpack(joinArgs)) end)
-    pcall(function() playRemote:FireServer(table.unpack(updateArgs)) end)
-    pcall(function() playRemote:FireServer(table.unpack(startArgs)) end)
-
+local function saveMacro(name, events)
+    if not name or name == "" then return false end
+    Macros[name] = { events = events }
+    refreshMacroDropdown()
     return true
 end
 
-local function startMapsLoop()
-    if mapsThread then return end
-    mapsEnabled = true
-    mapsThread = spawn(function()
-        while mapsEnabled do
-            local storySel = (storyDropdown and storyDropdown.CurrentOption and storyDropdown.CurrentOption[1]) or initStory
-            local chapterSel = (chaptersDropdown and chaptersDropdown.CurrentOption and chaptersDropdown.CurrentOption[1]) or initChapter
-            local diffSel = (difficultyDropdown and difficultyDropdown.CurrentOption and difficultyDropdown.CurrentOption[1]) or initDifficulty
-
-            local areaNumber = STORY_AREA_MAP[storySel] or tonumber(storySel) or 1
-            local chapterNumber = tonumber(chapterSel) or 1
-            local difficulty = diffSel or "Normal"
-
-            pcall(function() fireJoinAndUpdate(areaNumber, chapterNumber, difficulty) end)
-
-            local t0 = tick()
-            while mapsEnabled and tick() - t0 < 1.0 do
-                task.wait(0.03)
-            end
-        end
-        mapsThread = nil
-        pcall(function() if mapsToggle then mapsToggle.CurrentValue = false end end)
-    end)
+local function deleteMacro(name)
+    if not name or not Macros[name] then return false end
+    Macros[name] = nil
+    refreshMacroDropdown()
+    return true
 end
 
-local function stopMapsLoop()
-    mapsEnabled = false
-    local t0 = tick()
-    while mapsThread and tick() - t0 < 1.0 do
-        task.wait(0.03)
-    end
-    mapsThread = nil
-    pcall(function() if mapsToggle then mapsToggle.CurrentValue = false end end)
+-- ======= Input recording handlers =======
+local function onInputBegan(input, gameProcessed)
+    if not isRecording then return end
+    local t = tick() - recordingStart
+    local record = {
+        Type = "Began",
+        UserInputType = input.UserInputType,
+        KeyCode = input.KeyCode,
+        Position = (input.Position and Vector2.new(input.Position.X, input.Position.Y)) or nil,
+        Time = t,
+        GameProcessed = gameProcessed
+    }
+    table.insert(currentRecording, record)
 end
 
--- UI wiring (Macro, Maps, AutoMaps)
-loadMacros()
-
-local Tab = nil
-if Window and Window.CreateTab then
-    Tab = Window:CreateTab("Macro", 4483362458)
-end
-local Section = nil
-if Tab and Tab.CreateSection then
-    Section = Tab:CreateSection("Macro Controls")
-end
-
-local MacroNameInput = nil
-if Tab and Tab.CreateInput then
-    MacroNameInput = Tab:CreateInput({
-        Name = "MacroName",
-        CurrentValue = "",
-        PlaceholderText = "macro_name",
-        RemoveTextAfterFocusLost = false,
-        Flag = "MacroNameFlag",
-        Callback = function(val) end
-    })
-else
-    MacroNameInput = { CurrentValue = "" }
+local function onInputEnded(input, gameProcessed)
+    if not isRecording then return end
+    local t = tick() - recordingStart
+    local record = {
+        Type = "Ended",
+        UserInputType = input.UserInputType,
+        KeyCode = input.KeyCode,
+        Position = (input.Position and Vector2.new(input.Position.X, input.Position.Y)) or nil,
+        Time = t,
+        GameProcessed = gameProcessed
+    }
+    table.insert(currentRecording, record)
 end
 
-local macroDropdown = nil
-if Tab and Tab.CreateDropdown then
-    macroDropdown = Tab:CreateDropdown({
-        Name = "MacroSelect",
-        Options = macroNamesList(),
-        CurrentOption = {},
-        MultipleOptions = false,
-        Flag = "MacroSelectFlag",
-        Callback = function(selection)
-            local name = selection and selection[1]
-            if name and macros[name] then
-                MacroNameInput.CurrentValue = name
-                setMacroInfo("Selected Macro", ("Name: %s | Steps: %d"):format(name, macros[name].steps and #macros[name].steps or 0))
-            end
-        end
-    })
-else
-    macroDropdown = { Refresh = function() end, CurrentOption = {} }
-end
+-- ======= Playback =======
+local function playMacroByName(name, repeats)
+    local macro = Macros[name]
+    if not macro or not macro.events or #macro.events == 0 then return end
 
-local assignedMacroDropdown = nil
-
-local function refreshAllMacroDropdowns()
-    if macroDropdown and macroDropdown.Refresh then
-        macroDropdown:Refresh(macroNamesList())
-        pcall(function() macroDropdown.CurrentOption = {} end)
-    end
-    if assignedMacroDropdown and assignedMacroDropdown.Refresh then
-        assignedMacroDropdown:Refresh(macroNamesList())
-        pcall(function() assignedMacroDropdown.CurrentOption = {} end)
-    end
-end
-
-local recordToggleState = false
-local recordButton = nil
-if Tab and Tab.CreateButton then
-    recordButton = Tab:CreateButton({
-        Name = "Record / Stop",
-        Callback = function()
-            recordToggleState = not recordToggleState
-            if recordToggleState then
-                startRecording()
-                setMacroInfo("Recording", "Recording... (new placements will be captured)")
+    coroutine.wrap(function()
+        local events = macro.events
+        for i, ev in ipairs(events) do
+            local waitTime
+            if i == 1 then
+                waitTime = ev.Time
             else
-                stopRecording()
-                setMacroInfo("Recorded", ("Steps recorded: %d"):format(#recorded))
-                local name = MacroNameInput.CurrentValue
-                if name and name ~= "" then
-                    macros[name] = { steps = recorded, created = tick() }
-                    saveMacros()
-                    refreshAllMacroDropdowns()
-                    MacroNameInput.CurrentValue = ""
+                waitTime = ev.Time - events[i-1].Time
+            end
+            if waitTime and waitTime > 0 then
+                task.wait(waitTime)
+            end
+            MacroEvent:Fire({
+                Name = name,
+                Index = i,
+                Type = ev.Type,
+                UserInputType = ev.UserInputType,
+                KeyCode = ev.KeyCode,
+                Position = ev.Position,
+                GameProcessed = ev.GameProcessed,
+                Timestamp = tick()
+            })
+        end
+
+        if repeats and PlayToggle and PlayToggle.CurrentValue then
+            task.wait(0.05)
+            if PlayToggle.CurrentValue then
+                playMacroByName(name, repeats)
+            end
+        end
+    end)()
+end
+
+-- ======= Separate Recording GUI (ScreenGui) =======
+local function createRecordingGui()
+    local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 5)
+    if not playerGui then return nil end
+    local existing = playerGui:FindFirstChild("MacroRecordingGui")
+    if existing then return existing end
+
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "MacroRecordingGui"
+    screenGui.ResetOnSpawn = false
+    screenGui.Parent = playerGui
+
+    local frame = Instance.new("Frame")
+    frame.Name = "RecordingFrame"
+    frame.Size = UDim2.new(0, 200, 0, 60)
+    frame.Position = UDim2.new(0.5, -100, 0.06, 0)
+    frame.AnchorPoint = Vector2.new(0.5, 0)
+    frame.BackgroundColor3 = Color3.fromRGB(28, 28, 28)
+    frame.BorderSizePixel = 0
+    frame.Parent = screenGui
+
+    local uicorner = Instance.new("UICorner")
+    uicorner.CornerRadius = UDim.new(0, 8)
+    uicorner.Parent = frame
+
+    local dot = Instance.new("Frame")
+    dot.Name = "Dot"
+    dot.Size = UDim2.new(0, 14, 0, 14)
+    dot.Position = UDim2.new(0, 12, 0.5, -7)
+    dot.BackgroundColor3 = Color3.fromRGB(255, 75, 75)
+    dot.BorderSizePixel = 0
+    dot.Parent = frame
+
+    local dotCorner = Instance.new("UICorner")
+    dotCorner.CornerRadius = UDim.new(1, 0)
+    dotCorner.Parent = dot
+
+    local label = Instance.new("TextLabel")
+    label.Name = "RecordingLabel"
+    label.Size = UDim2.new(0, 110, 1, 0)
+    label.Position = UDim2.new(0, 36, 0, 0)
+    label.BackgroundTransparency = 1
+    label.Text = "Recording"
+    label.TextColor3 = Color3.fromRGB(255, 255, 255)
+    label.Font = Enum.Font.GothamBold
+    label.TextSize = 18
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.Parent = frame
+
+    local stopBtn = Instance.new("TextButton")
+    stopBtn.Name = "StopButton"
+    stopBtn.Size = UDim2.new(0, 56, 0, 28)
+    stopBtn.Position = UDim2.new(1, -68, 0.5, -14)
+    stopBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    stopBtn.Text = "Stop"
+    stopBtn.TextColor3 = Color3.fromRGB(255,255,255)
+    stopBtn.Font = Enum.Font.Gotham
+    stopBtn.TextSize = 14
+    stopBtn.Parent = frame
+
+    local stopCorner = Instance.new("UICorner")
+    stopCorner.CornerRadius = UDim.new(0, 6)
+    stopCorner.Parent = stopBtn
+
+    frame.Active = true
+    frame.Draggable = true
+
+    local pulseConnection
+    pulseConnection = RunService.Heartbeat:Connect(function()
+        if not dot or not dot.Parent then
+            if pulseConnection then pulseConnection:Disconnect() end
+            return
+        end
+        local s = (math.sin(tick()*6) + 1) / 2
+        local scale = 1 + s * 0.35
+        dot.Size = UDim2.new(0, 14 * scale, 0, 14 * scale)
+        dot.Position = UDim2.new(0, 12 - (7*(scale-1)), 0.5, -7 - (7*(scale-1)))
+    end)
+
+    stopBtn.MouseButton1Click:Connect(function()
+        if isRecording then
+            isRecording = false
+            if inputConn then
+                for _, c in ipairs(inputConn) do
+                    if c and c.Disconnect then c:Disconnect() end
+                end
+                inputConn = nil
+            end
+            local name = MacroNameInput and MacroNameInput.CurrentValue or ""
+            if name == nil or name == "" then
+                name = "macro_" .. tostring(math.floor(tick()))
+            end
+            local ok = saveMacro(name, currentRecording)
+            if ok then
+                MacroDropdown:Refresh(MacroNames)
+                MacroDropdown:Set(name)
+                CurrentMacro = name
+            end
+            screenGui.Enabled = false
+        end
+    end)
+
+    screenGui.Enabled = false
+    return screenGui
+end
+
+local RecordingGui = createRecordingGui()
+
+-- ======= Rayfield UI elements (no extra state boxes) =======
+MacroDropdown = Tab:CreateDropdown({
+    Name = "MacroSelect",
+    Options = {},
+    CurrentOption = {},
+    MultipleOptions = false,
+    Flag = "MacroSelectFlag",
+    Callback = function(Options)
+        if type(Options) == "table" and #Options > 0 then
+            CurrentMacro = Options[1]
+            if MacroNameInput then MacroNameInput:Set(CurrentMacro) end
+        else
+            CurrentMacro = nil
+        end
+    end,
+})
+
+MacroNameInput = Tab:CreateInput({
+    Name = "MacroName",
+    CurrentValue = "",
+    PlaceholderText = "macro_name",
+    RemoveTextAfterFocusLost = false,
+    Flag = "MacroNameFlag",
+    Callback = function(Text) end,
+})
+
+local RecordStateLabel = Tab:CreateLabel("Idle", 4483362458, Color3.fromRGB(255,255,255), false)
+
+local RecordButton = Tab:CreateButton({
+    Name = "Record / Stop",
+    Callback = function()
+        if not isRecording then
+            isRecording = true
+            currentRecording = {}
+            recordingStart = tick()
+            inputConn = {}
+            inputConn[1] = UserInputService.InputBegan:Connect(onInputBegan)
+            inputConn[2] = UserInputService.InputEnded:Connect(onInputEnded)
+            if RecordingGui then RecordingGui.Enabled = true end
+            if RecordStateLabel then RecordStateLabel:Set("Recording...") end
+        else
+            isRecording = false
+            if inputConn then
+                for _, c in ipairs(inputConn) do
+                    if c and c.Disconnect then c:Disconnect() end
+                end
+                inputConn = nil
+            end
+            local name = MacroNameInput and MacroNameInput.CurrentValue or ""
+            if name == nil or name == "" then
+                name = "macro_" .. tostring(math.floor(tick()))
+            end
+            local ok = saveMacro(name, currentRecording)
+            if ok then
+                MacroDropdown:Refresh(MacroNames)
+                MacroDropdown:Set(name)
+                CurrentMacro = name
+            end
+            if RecordingGui then RecordingGui.Enabled = false end
+            if RecordStateLabel then RecordStateLabel:Set("Idle") end
+        end
+    end,
+})
+
+PlayToggle = Tab:CreateToggle({
+    Name = "Play Macro (repeats)",
+    CurrentValue = false,
+    Flag = "PlayMacroToggle",
+    Callback = function(Value)
+        if Value then
+            if CurrentMacro and Macros[CurrentMacro] then
+                playMacroByName(CurrentMacro, true)
+            else
+                PlayToggle:Set(false)
+            end
+        end
+    end,
+})
+
+local PlayOnceButton = Tab:CreateButton({
+    Name = "Play Once",
+    Callback = function()
+        if CurrentMacro and Macros[CurrentMacro] then
+            playMacroByName(CurrentMacro, false)
+        end
+    end,
+})
+
+local DeleteButton = Tab:CreateButton({
+    Name = "Delete Selected Macro",
+    Callback = function()
+        if CurrentMacro and Macros[CurrentMacro] then
+            deleteMacro(CurrentMacro)
+            CurrentMacro = nil
+            MacroDropdown:Refresh(MacroNames)
+            MacroNameInput:Set("")
+        end
+    end,
+})
+
+local RefreshButton = Tab:CreateButton({
+    Name = "Refresh Macros",
+    Callback = function()
+        refreshMacroDropdown()
+    end,
+})
+
+Tab:CreateParagraph({Title = "Macros", Content = "Record keyboard/mouse input. Playback fires MacroEvent in ReplicatedStorage/workspace. Connect to it to perform actions on playback."})
+
+-- ======= Expose macro API =======
+_G.RayfieldMacros = {
+    GetMacros = function() return Macros end,
+    Play = function(name) playMacroByName(name, false) end,
+    PlayLoop = function(name) playMacroByName(name, true) end,
+    Delete = function(name) deleteMacro(name) end,
+    Save = function(name, events) return saveMacro(name, events) end,
+    MacroEvent = MacroEvent
+}
+
+refreshMacroDropdown()
+
+-- ======= MacroGuidHelper (scans for GUIDs and finds Spawn remote) =======
+local MacroGuidHelper = {}
+MacroGuidHelper._guidMap = {}
+MacroGuidHelper._equipped = {}
+MacroGuidHelper._spawnRemote = nil
+local uuidPattern = "%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x"
+
+local function safeDescendants(root)
+    local ok, res = pcall(function() return root:GetDescendants() end)
+    if ok and type(res) == "table" then return res end
+    return {}
+end
+
+local function scanRootForGuids(root)
+    for _, obj in ipairs(safeDescendants(root)) do
+        if obj:IsA("StringValue") and type(obj.Value) == "string" then
+            local s = obj.Value
+            for match in string.gmatch(s, uuidPattern) do
+                MacroGuidHelper._guidMap[match] = { path = obj:GetFullName(), source = obj }
+            end
+        end
+        if obj.GetAttributes then
+            local ok, attrs = pcall(function() return obj:GetAttributes() end)
+            if ok and type(attrs) == "table" then
+                for k,v in pairs(attrs) do
+                    if type(v) == "string" then
+                        for match in string.gmatch(v, uuidPattern) do
+                            MacroGuidHelper._guidMap[match] = { path = obj:GetFullName() .. " (Attribute:"..tostring(k)..")", source = obj }
+                        end
+                    end
                 end
             end
         end
-    })
+        if type(obj.Name) == "string" then
+            for match in string.gmatch(obj.Name, uuidPattern) do
+                MacroGuidHelper._guidMap[match] = { path = obj:GetFullName() .. " (Name)", source = obj }
+            end
+        end
+        if obj:IsA("ModuleScript") then
+            local ok, src = pcall(function() return obj.Source end)
+            if ok and type(src) == "string" then
+                for match in string.gmatch(src, uuidPattern) do
+                    MacroGuidHelper._guidMap[match] = { path = obj:GetFullName() .. " (ModuleScript source)", source = obj }
+                end
+            end
+        end
+    end
 end
 
-local playRepeats = false
-local playToggle = nil
-if Tab and Tab.CreateToggle then
-    playToggle = Tab:CreateToggle({
-        Name = "Play Macro (repeats)",
-        CurrentValue = false,
-        Flag = "PlayRepeatsFlag",
-        Callback = function(val)
-            playRepeats = val
-            local sel = macroDropdown.CurrentOption and macroDropdown.CurrentOption[1]
-            if not sel or sel == "" then
-                setMacroInfo("Playback", "No macro selected")
-                if val and playToggle then pcall(function() playToggle.CurrentValue = false end) end
-                return
-            end
-
-            if val then
-                setMacroInfo("Playback", ("Playing '%s' (repeats=%s)"):format(sel, tostring(playRepeats)))
-                startPlayback(sel, playRepeats)
-            else
-                stopPlayback()
-                setMacroInfo("Playback", "Playback stopped")
-            end
-        end
-    })
-end
-
-local deleteButton = nil
-if Tab and Tab.CreateButton then
-    deleteButton = Tab:CreateButton({
-        Name = "Delete Selected Macro",
-        Callback = function()
-            local sel = macroDropdown and macroDropdown.CurrentOption and macroDropdown.CurrentOption[1]
-            if not sel or sel == "" then
-                setMacroInfo("Delete Macro", "No macro selected")
-                return
-            end
-
-            if currentPlaying and tostring(currentPlaying) == tostring(sel) then
-                stopPlayback()
-                task.wait(0.12)
-            end
-
-            macros[sel] = nil
-            saveMacros()
-            refreshAllMacroDropdowns()
-            setMacroInfo("Deleted", ("Deleted macro '%s'"):format(sel))
-        end
-    })
-end
-
-local clearAllButton = nil
-if Tab and Tab.CreateButton then
-    clearAllButton = Tab:CreateButton({
-        Name = "Clear All Macros",
-        Callback = function()
-            if currentPlaying then
-                stopPlayback()
-            end
-            macros = {}
-            saveMacros()
-            refreshAllMacroDropdowns()
-            setMacroInfo("Cleared", "All macros cleared")
-        end
-    })
-end
-
-local autoUpgradeToggle = nil
-if Tab and Tab.CreateToggle then
-    autoUpgradeToggle = Tab:CreateToggle({
-        Name = "AutoUpgrade",
-        CurrentValue = false,
-        Flag = "AutoUpgradeFlag",
-        Callback = function(val)
-            if val then startAutoUpgrade_Debug() else stopAutoUpgrade_Debug() end
-        end
-    })
-end
-
--- Maps tab UI wiring (with persistence)
-local MapsTab = nil
-if Window and Window.CreateTab then
-    MapsTab = Window:CreateTab("Maps", 4483362458)
-end
-if MapsTab and MapsTab.CreateSection then
-    MapsTab:CreateSection("Story Map Controls")
-
-    local storyOptions = {"Namek Planet", "Hidden Leaf", "Sabaody Islands", "Hage Village", "Snowy Village"}
-    local chapterOptions = {"1","2","3","4","5","6","7"}
-    local difficultyOptions = {"Normal","Hard"}
-
-    storyDropdown = MapsTab:CreateDropdown({
-        Name = "Story",
-        Options = storyOptions,
-        CurrentOption = { tostring(initStory) },
-        MultipleOptions = false,
-        Flag = "MapsStoryFlag",
-        Callback = function(selection)
-            local sel = selection and selection[1]
-            if sel and sel ~= "" then
-                writeFlag("MapsStoryFlag", { tostring(sel) })
-            end
-        end
-    })
-
-    chaptersDropdown = MapsTab:CreateDropdown({
-        Name = "Chapters",
-        Options = chapterOptions,
-        CurrentOption = { tostring(initChapter) },
-        MultipleOptions = false,
-        Flag = "MapsChapterFlag",
-        Callback = function(selection)
-            local sel = selection and selection[1]
-            if sel and sel ~= "" then
-                writeFlag("MapsChapterFlag", { tostring(sel) })
-            end
-        end
-    })
-
-    difficultyDropdown = MapsTab:CreateDropdown({
-        Name = "Difficulty",
-        Options = difficultyOptions,
-        CurrentOption = { tostring(initDifficulty) },
-        MultipleOptions = false,
-        Flag = "MapsDifficultyFlag",
-        Callback = function(selection)
-            local sel = selection and selection[1]
-            if sel and sel ~= "" then
-                writeFlag("MapsDifficultyFlag", { tostring(sel) })
-            end
-        end
-    })
-
-    mapsToggle = MapsTab:CreateToggle({
-        Name = "Auto Join Story Map",
-        CurrentValue = initAutoJoin,
-        Flag = "MapsAutoJoinFlag",
-        Callback = function(val)
-            writeFlag("MapsAutoJoinFlag", (val == true))
-            if val then
-                startMapsLoop()
-            else
-                stopMapsLoop()
-            end
-        end
-    })
-
-    pcall(function()
-        if storyDropdown and storyDropdown.Refresh then
-            storyDropdown:Refresh(storyOptions)
-            pcall(function() storyDropdown.CurrentOption = { tostring(initStory) } end)
-        end
-        if chaptersDropdown and chaptersDropdown.Refresh then
-            chaptersDropdown:Refresh(chapterOptions)
-            pcall(function() chaptersDropdown.CurrentOption = { tostring(initChapter) } end)
-        end
-        if difficultyDropdown and difficultyDropdown.Refresh then
-            difficultyDropdown:Refresh(difficultyOptions)
-            pcall(function() difficultyDropdown.CurrentOption = { tostring(initDifficulty) } end)
-        end
-        if mapsToggle then
-            pcall(function() mapsToggle.CurrentValue = initAutoJoin end)
-        end
-    end)
-
-    pcall(function()
-        writeFlag("MapsStoryFlag", { tostring(initStory) })
-            writeFlag("MapsChapterFlag", { tostring(initChapter) })
-        writeFlag("MapsDifficultyFlag", { tostring(initDifficulty) })
-        writeFlag("MapsAutoJoinFlag", initAutoJoin)
-        if type(Rayfield.SaveConfiguration) == "function" then
-            pcall(function() Rayfield:SaveConfiguration() end)
-        end
-    end)
-end
-
--- -------------------------
--- AutoMaps tab (restored, created AFTER Maps so order is Maps -> AutoMaps)
--- -------------------------
-local AutoMapsTab = nil
-if Window and Window.CreateTab then
-    AutoMapsTab = Window:CreateTab("AutoMaps", 4483362458)
-end
-
--- AutoMaps watcher state
-local autoMapsWatcherThread = nil
-local autoMapsWatcherEnabled = false
-local lastDetectedMap = nil
-local autoMapsDebounce = 0.6 -- seconds between map-change reactions
-
-if AutoMapsTab and AutoMapsTab.CreateSection then
-    AutoMapsTab:CreateSection("AutoMaps Controls")
-
-    -- Options (map display names must match assignedMappings keys)
-    local automapOptions = {
-        "Sabaody Islands",
-        "Namek Planet",
-        "Hidden Leaf",
-        "Hage Village",
-        "Snowy Village",
-        "Hueco Mundo",
-        "Karakura Town",
-        "Infinite Castle",
-        "Onigashima"
+local function buildGuidMap()
+    MacroGuidHelper._guidMap = {}
+    local roots = {
+        ReplicatedStorage,
+        workspace,
+        workspace:FindFirstChild("Packages") or workspace,
+        LocalPlayer,
+        LocalPlayer:FindFirstChild("Backpack") or LocalPlayer,
     }
-    local assignedFlag = "AutoMaps_AssignedMacros_JSON" -- stores JSON mapping { mapName = macroName }
-    local selectedMapFlag = "AutoMaps_SelectedMap"
-    local automapsEnableFlag = "AutoMaps_Enable"
-
-    -- Load assigned mapping (JSON) safely
-    local function loadAssignedMappings()
-        local raw = readFlag(assignedFlag)
-        local assigned = {}
-        if raw then
-            if type(raw) == "string" then
-                local ok, t = pcall(function() return HttpService:JSONDecode(raw) end)
-                if ok and type(t) == "table" then assigned = t end
-            elseif type(raw) == "table" then
-                assigned = raw
-            end
-        end
-        return assigned
+    for _, r in ipairs(roots) do
+        if r then pcall(scanRootForGuids, r) end
     end
+    pcall(function()
+        local rep = ReplicatedStorage:FindFirstChild("Replicated")
+        if rep then scanRootForGuids(rep) end
+    end)
+    pcall(function()
+        local packages = ReplicatedStorage:FindFirstChild("Packages")
+        if packages then scanRootForGuids(packages) end
+    end)
+    return MacroGuidHelper._guidMap
+end
 
-    local function saveAssignedMappings(tbl)
-        if not tbl or type(tbl) ~= "table" then tbl = {} end
-        local ok, raw = pcall(function() return HttpService:JSONEncode(tbl) end)
-        if ok and raw then
-            writeFlag(assignedFlag, raw)
-        end
-    end
+local function findEquippedTowers()
+    MacroGuidHelper._equipped = {}
+    local containers = {}
+    table.insert(containers, LocalPlayer:FindFirstChild("Backpack"))
+    table.insert(containers, LocalPlayer.Character)
+    table.insert(containers, workspace:FindFirstChild("Units"))
+    table.insert(containers, workspace:FindFirstChild(LocalPlayer.Name))
+    table.insert(containers, workspace:FindFirstChild("PlayerUnits"))
+    table.insert(containers, workspace)
 
-    local assignedMappings = loadAssignedMappings()
-
-    -- initial values
-    local initAutoMapsEnable = false
-    local rawEnable = readFlag(automapsEnableFlag)
-    if type(rawEnable) == "boolean" then initAutoMapsEnable = rawEnable
-    elseif type(rawEnable) == "string" then initAutoMapsEnable = (rawEnable == "true") end
-
-    local initSelectedMap = nil
-    local rawSel = readFlag(selectedMapFlag)
-    if type(rawSel) == "table" and rawSel[1] then initSelectedMap = tostring(rawSel[1])
-    elseif type(rawSel) == "string" and rawSel ~= "" then initSelectedMap = rawSel end
-    initSelectedMap = initSelectedMap or automapOptions[1]
-
-    -- UI elements
-    local autoMapsToggle = AutoMapsTab:CreateToggle({
-        Name = "Auto Map Macro",
-        CurrentValue = initAutoMapsEnable,
-        Flag = automapsEnableFlag,
-        Callback = function(val)
-            writeFlag(automapsEnableFlag, (val == true))
-            -- start/stop watcher
-            if val then
-                autoMapsWatcherEnabled = true
-                if not autoMapsWatcherThread then
-                    autoMapsWatcherThread = spawn(function()
-                        local tLast = 0
-                        local prevUnitCount = nil
-                        local lastRestartTime = 0
-                        local RESTART_COOLDOWN = 3.0 -- seconds between automatic restarts to avoid spam
-
-                        while autoMapsWatcherEnabled do
-                            local ok, detected = pcall(function()
-                                local build = workspace:FindFirstChild("Build")
-                                if not build then return nil end
-                                local mapFolderLookup = {
-                                    ["Namek Planet"] = "Namek",
-                                    ["Hidden Leaf"] = "Hidden Leaf",
-                                    ["Sabaody Islands"] = "Sabaody",
-                                    ["Hage Village"] = "Hage Village",
-                                    ["Snowy Village"] = "Snowy Village",
-                                    ["Hueco Mundo"] = "Hueco Mundo",
-                                    ["Karakura Town"] = "Karakura Town",
-                                    ["Infinite Castle"] = "Infinite Castle",
-                                    ["Onigashima"] = "Onigashima",
-                                }
-                                for _, displayName in ipairs(automapOptions) do
-                                    local folderName = mapFolderLookup[displayName]
-                                    if folderName and build:FindFirstChild(folderName) then
-                                        return displayName
-                                    end
+    for _, container in ipairs(containers) do
+        if container then
+            for _, obj in ipairs(safeDescendants(container)) do
+                if obj.GetAttributes then
+                    local ok, attrs = pcall(function() return obj:GetAttributes() end)
+                    if ok and type(attrs) == "table" then
+                        for k,v in pairs(attrs) do
+                            if type(v) == "string" then
+                                for match in string.gmatch(v, uuidPattern) do
+                                    table.insert(MacroGuidHelper._equipped, { name = obj.Name or "Unnamed", guid = match, instance = obj, source = container:GetFullName() })
                                 end
-                                return nil
-                            end)
-
-                            if ok then
-                                local now = tick()
-
-                                -- Map-change reaction (debounced)
-                                if detected ~= lastDetectedMap and detected ~= nil and (now - tLast) >= autoMapsDebounce then
-                                    lastDetectedMap = detected
-                                    tLast = now
-                                    local assigned = assignedMappings[detected]
-                                    if assigned and assigned ~= "" and macros[assigned] then
-                                        pcall(function()
-                                            setMacroInfo("AutoMaps", ("Detected map '%s' -> playing assigned macro '%s'"):format(tostring(detected), tostring(assigned)), 3.0)
-                                            startPlayback(assigned, false)
-                                        end)
-                                    else
-                                        pcall(function()
-                                            setMacroInfo("AutoMaps", ("Detected map '%s' -> no macro assigned"):format(tostring(detected)), 2.5)
-                                        end)
-                                    end
-                                    -- reset prevUnitCount so we start fresh monitoring for this map
-                                    prevUnitCount = nil
-                                end
-                            end
-
-                            -- Optional: restart assigned macro when Units are cleared (new match)
-                            local ok2, unitsFolder = pcall(function() return workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Units") end)
-                            if ok2 and unitsFolder then
-                                local children = {}
-                                pcall(function() children = unitsFolder:GetChildren() end)
-                                local count = #children
-                                if lastDetectedMap and assignedMappings[lastDetectedMap] and macros[assignedMappings[lastDetectedMap]] then
-                                    if prevUnitCount and prevUnitCount > 0 and count == 0 and (tick() - lastRestartTime) >= RESTART_COOLDOWN then
-                                        lastRestartTime = tick()
-                                        local assigned = assignedMappings[lastDetectedMap]
-                                        pcall(function()
-                                            setMacroInfo("AutoMaps", ("Units cleared for '%s' -> restarting assigned macro '%s'"):format(tostring(lastDetectedMap), tostring(assigned)), 3.0)
-                                            stopPlayback()
-                                            task.wait(0.12)
-                                            startPlayback(assigned, false)
-                                        end)
-                                    end
-                                end
-                                prevUnitCount = count
-                            end
-
-                            -- small sleep to avoid busy loop
-                            local t0 = tick()
-                            while autoMapsWatcherEnabled and tick() - t0 < 0.45 do
-                                task.wait(0.05)
                             end
                         end
-
-                        autoMapsWatcherThread = nil
-                    end)
+                    end
                 end
-            else
-                autoMapsWatcherEnabled = false
-                lastDetectedMap = nil
+                if obj:IsA("StringValue") and type(obj.Value) == "string" then
+                    for match in string.gmatch(obj.Value, uuidPattern) do
+                        table.insert(MacroGuidHelper._equipped, { name = obj.Name or "Unnamed", guid = match, instance = obj, source = container:GetFullName() })
+                    end
+                end
+                if obj:IsA("ModuleScript") then
+                    local ok, src = pcall(function() return obj.Source end)
+                    if ok and type(src) == "string" then
+                        for match in string.gmatch(src, uuidPattern) do
+                            table.insert(MacroGuidHelper._equipped, { name = obj.Name or "Module", guid = match, instance = obj, source = container:GetFullName() })
+                        end
+                    end
+                end
             end
-        end
-    })
-
-    local autoMapsDropdown = AutoMapsTab:CreateDropdown({
-        Name = "Select Map",
-        Options = automapOptions,
-        CurrentOption = { tostring(initSelectedMap) },
-        MultipleOptions = false,
-        Flag = selectedMapFlag,
-        Callback = function(selection)
-            local sel = selection and selection[1]
-            if sel and sel ~= "" then
-                writeFlag(selectedMapFlag, { tostring(sel) })
-            end
-        end
-    })
-
-    -- Assigned macro dropdown (shows macros available)
-    assignedMacroDropdown = AutoMapsTab:CreateDropdown({
-        Name = "Assigned Macro",
-        Options = macroNamesList(),
-        CurrentOption = {},
-        MultipleOptions = false,
-        Flag = "AutoMaps_AssignedMacroSelect",
-        Callback = function(selection)
-            -- no-op here; assignment happens with button
-        end
-    })
-
-    -- Helper to refresh assigned macro dropdown options
-    local function refreshAssignedMacroOptions()
-        if assignedMacroDropdown and assignedMacroDropdown.Refresh then
-            assignedMacroDropdown:Refresh(macroNamesList())
-            pcall(function() assignedMacroDropdown.CurrentOption = {} end)
         end
     end
 
-    -- Show current assignment for selected map
-    local function getAssignedForMap(mapName)
-        if not mapName then return nil end
-        return assignedMappings[mapName]
+    local seen = {}
+    local dedup = {}
+    for _, e in ipairs(MacroGuidHelper._equipped) do
+        if not seen[e.guid] then
+            seen[e.guid] = true
+            table.insert(dedup, e)
+        end
+    end
+    MacroGuidHelper._equipped = dedup
+    return MacroGuidHelper._equipped
+end
+
+local function findSpawnRemote()
+    local ok, rep = pcall(function() return ReplicatedStorage:FindFirstChild("Replicated") end)
+    local repRoot = rep or ReplicatedStorage
+    local function tryPath(root)
+        if not root then return nil end
+        local current = root
+        local names = {"Packages", "Knit", "Services", "AttackUnitService", "RF", "Spawn"}
+        for _, n in ipairs(names) do
+            current = current:FindFirstChild(n)
+            if not current then return nil end
+        end
+        return current
+    end
+    local remote = tryPath(repRoot)
+    if remote then
+        MacroGuidHelper._spawnRemote = remote
+        return remote
+    end
+    for _, obj in ipairs(safeDescendants(ReplicatedStorage)) do
+        if (obj:IsA("RemoteFunction") or obj:IsA("RemoteEvent")) and obj.Name:lower():find("spawn") then
+            MacroGuidHelper._spawnRemote = obj
+            return obj
+        end
+    end
+    return nil
+end
+
+local function tryWrapSpawnInvoke()
+    local spawnRemote = MacroGuidHelper._spawnRemote
+    if not spawnRemote then return false end
+    if spawnRemote:IsA("RemoteFunction") then
+        if not MacroGuidHelper._invokeWrapper then
+            MacroGuidHelper._invokeWrapper = function(...)
+                local args = {...}
+                for i, a in ipairs(args) do
+                    if type(a) == "string" and string.match(a, uuidPattern) then
+                        MacroGuidHelper._guidMap[a] = MacroGuidHelper._guidMap[a] or { path = "Captured from Spawn InvokeServer", source = spawnRemote }
+                        print("[MacroGuidHelper] Captured GUID from Spawn args:", a)
+                    end
+                end
+                local ok, res = pcall(function() return spawnRemote:InvokeServer(unpack(args)) end)
+                if not ok then warn("[MacroGuidHelper] Spawn InvokeServer wrapper error:", res) end
+                return res
+            end
+            return true
+        end
+    elseif spawnRemote:IsA("RemoteEvent") then
+        if not MacroGuidHelper._eventConn then
+            local conn = spawnRemote.OnClientEvent:Connect(function(...)
+                local args = {...}
+                for i, a in ipairs(args) do
+                    if type(a) == "string" and string.match(a, uuidPattern) then
+                        MacroGuidHelper._guidMap[a] = MacroGuidHelper._guidMap[a] or { path = "Captured from Spawn OnClientEvent", source = spawnRemote }
+                        print("[MacroGuidHelper] Captured GUID from Spawn event:", a)
+                    end
+                end
+            end)
+            MacroGuidHelper._eventConn = conn
+            return true
+        end
+    end
+    return false
+end
+
+local function placeTower(guid, cframe)
+    if type(guid) ~= "string" then return false, "guid must be string" end
+    if typeof(cframe) ~= "CFrame" then return false, "cframe must be CFrame" end
+    if not MacroGuidHelper._spawnRemote then findSpawnRemote() end
+    if not MacroGuidHelper._spawnRemote then return false, "Spawn remote not found" end
+    local args = { guid, cframe }
+    local ok, res = pcall(function()
+        if MacroGuidHelper._invokeWrapper then
+            return MacroGuidHelper._invokeWrapper(unpack(args))
+        else
+            return MacroGuidHelper._spawnRemote:InvokeServer(unpack(args))
+        end
+    end)
+    if not ok then return false, res end
+    return true, res
+end
+
+MacroGuidHelper.GetGuidMap = function() return MacroGuidHelper._guidMap end
+MacroGuidHelper.RebuildGuidMap = function() return buildGuidMap() end
+MacroGuidHelper.FindEquipped = function() return findEquippedTowers() end
+MacroGuidHelper.FindSpawnRemote = function() return findSpawnRemote() end
+MacroGuidHelper.TryWrapSpawn = function() return tryWrapSpawnInvoke() end
+MacroGuidHelper.PlaceTower = function(guid, cframe) return placeTower(guid, cframe) end
+
+buildGuidMap()
+findEquippedTowers()
+findSpawnRemote()
+tryWrapSpawnInvoke()
+
+spawn(function()
+    while true do
+        task.wait(6)
+        buildGuidMap()
+        findEquippedTowers()
+        if not MacroGuidHelper._spawnRemote then
+            findSpawnRemote()
+            tryWrapSpawnInvoke()
+        end
+    end
+end)
+
+_G.MacroGuidHelper = MacroGuidHelper
+
+-- ======= TowerPlacementWatcher (watches workspace.Towers) =======
+local TowerPlacementWatcher = {}
+TowerPlacementWatcher.history = {}
+TowerPlacementWatcher.indexByUUID = {}
+TowerPlacementWatcher.indexByName = {}
+TowerPlacementWatcher.maxHistory = 200
+TowerPlacementWatcher.towersFolder = workspace:FindFirstChild("Towers")
+
+local function safeGet(obj, fn)
+    local ok, res = pcall(fn)
+    if ok then return res end
+    return nil
+end
+
+local function recordPlacement(instance)
+    if not instance or not instance.Parent then return end
+    local config = instance:FindFirstChild("Config")
+    if not config then return end
+
+    local towerNameVal = config:FindFirstChild("TowerName")
+    local unitUUIDVal = config:FindFirstChild("UnitUUID")
+
+    local towerName = nil
+    local unitUUID = nil
+
+    if towerNameVal and towerNameVal:IsA("StringValue") then
+        towerName = towerNameVal.Value
+    else
+        towerName = safeGet(config, function() return config:FindFirstChild("TowerName") and config:FindFirstChild("TowerName").Value end)
     end
 
-    -- Assign button
-    AutoMapsTab:CreateButton({
-        Name = "Assign Selected Macro to Map",
-        Callback = function()
-            local selMap = (autoMapsDropdown and autoMapsDropdown.CurrentOption and autoMapsDropdown.CurrentOption[1]) or initSelectedMap
-            local selMacro = (assignedMacroDropdown and assignedMacroDropdown.CurrentOption and assignedMacroDropdown.CurrentOption[1])
-            if not selMap or selMap == "" then
-                return
-            end
-            if not selMacro or selMacro == "" then
-                return
-            end
-            assignedMappings[selMap] = selMacro
-            saveAssignedMappings(assignedMappings)
-            setMacroInfo("AutoMaps Assignment", ("Map '%s' -> Macro '%s'"):format(tostring(selMap), tostring(selMacro)), 3.5)
-        end
-    })
-
-    -- Show current assignment button (now uses popup)
-    AutoMapsTab:CreateButton({
-        Name = "Show Assignment for Selected Map",
-        Callback = function()
-            local selMap = (autoMapsDropdown and autoMapsDropdown.CurrentOption and autoMapsDropdown.CurrentOption[1]) or initSelectedMap
-            local assigned = getAssignedForMap(selMap)
-            if assigned then
-                setMacroInfo("AutoMaps Assignment", ("Map '%s' -> Macro '%s'"):format(tostring(selMap), tostring(assigned)))
-            else
-                setMacroInfo("AutoMaps Assignment", ("Map '%s' -> (none)"):format(tostring(selMap)))
-            end
-        end
-    })
-
-    -- Save assignments to Rayfield flags explicitly (also called when seeding defaults)
-    local function persistAssignedMappings()
-        saveAssignedMappings(assignedMappings)
+    if unitUUIDVal and unitUUIDVal:IsA("StringValue") then
+        unitUUID = unitUUIDVal.Value
+    else
+        unitUUID = safeGet(config, function() return config:FindFirstChild("UnitUUID") and config:FindFirstChild("UnitUUID").Value end)
     end
 
-    -- Refresh macro options initially
-    refreshAssignedMacroOptions()
-
-    -- Ensure flags exist on disk (create and save)
-    pcall(function()
-        writeFlag(selectedMapFlag, { tostring(initSelectedMap) })
-        writeFlag(automapsEnableFlag, initAutoMapsEnable)
-        persistAssignedMappings()
-        if type(Rayfield.SaveConfiguration) == "function" then
-            pcall(function() Rayfield:SaveConfiguration() end)
+    local basePart = instance:FindFirstChild("TowerBase")
+    local cframe = nil
+    if basePart and basePart:IsA("BasePart") then
+        cframe = basePart.CFrame
+    else
+        local primary = safeGet(instance, function() return instance.PrimaryPart end)
+        if primary and primary:IsA("BasePart") then
+            cframe = primary.CFrame
+        else
+            for _, d in ipairs(instance:GetDescendants()) do
+                if d:IsA("BasePart") then
+                    cframe = d.CFrame
+                    break
+                end
+            end
         end
+    end
+
+    local rec = {
+        name = towerName or "Unknown",
+        uuid = unitUUID or "Unknown",
+        cframe = cframe,
+        instance = instance,
+        timestamp = tick()
+    }
+
+    table.insert(TowerPlacementWatcher.history, rec)
+    if #TowerPlacementWatcher.history > TowerPlacementWatcher.maxHistory then
+        table.remove(TowerPlacementWatcher.history, 1)
+    end
+
+    if rec.uuid and rec.uuid ~= "Unknown" then
+        TowerPlacementWatcher.indexByUUID[rec.uuid] = rec
+    end
+
+    if rec.name then
+        TowerPlacementWatcher.indexByName[rec.name] = TowerPlacementWatcher.indexByName[rec.name] or {}
+        table.insert(TowerPlacementWatcher.indexByName[rec.name], rec)
+        if #TowerPlacementWatcher.indexByName[rec.name] > 10 then
+            table.remove(TowerPlacementWatcher.indexByName[rec.name], 1)
+        end
+    end
+
+    if _G and _G.MacroGuidHelper and rec.uuid and rec.uuid ~= "Unknown" then
+        _G.MacroGuidHelper._guidMap = _G.MacroGuidHelper._guidMap or {}
+        if not _G.MacroGuidHelper._guidMap[rec.uuid] then
+            _G.MacroGuidHelper._guidMap[rec.uuid] = { path = instance:GetFullName() .. " (captured from workspace.Towers)", source = instance }
+        end
+    end
+
+    return rec
+end
+
+local function initialScan()
+    TowerPlacementWatcher.towersFolder = workspace:FindFirstChild("Towers")
+    if not TowerPlacementWatcher.towersFolder then return end
+    for _, child in ipairs(TowerPlacementWatcher.towersFolder:GetChildren()) do
+        if child:IsA("Model") or child:IsA("Folder") then
+            pcall(function() recordPlacement(child) end)
+        end
+    end
+end
+
+local childAddedConn = nil
+local function startWatching()
+    TowerPlacementWatcher.towersFolder = workspace:FindFirstChild("Towers")
+    if not TowerPlacementWatcher.towersFolder then
+        TowerPlacementWatcher.towersFolder = workspace:WaitForChild("Towers", 5)
+        if not TowerPlacementWatcher.towersFolder then return end
+    end
+
+    initialScan()
+
+    if childAddedConn then childAddedConn:Disconnect(); childAddedConn = nil end
+
+    childAddedConn = TowerPlacementWatcher.towersFolder.ChildAdded:Connect(function(child)
+        task.delay(0.05, function()
+            local ok, rec = pcall(function() return recordPlacement(child) end)
+            if ok and rec then
+                pcall(function()
+                    MacroEvent:Fire({
+                        EventType = "PlacementCaptured",
+                        name = rec.name,
+                        uuid = rec.uuid,
+                        cframe = rec.cframe,
+                        instance = rec.instance,
+                        timestamp = rec.timestamp
+                    })
+                end)
+            end
+        end)
     end)
 end
 
--- Final UI init
-if macroDropdown and macroDropdown.Refresh then macroDropdown:Refresh(macroNamesList()) end
-pcall(function()
-    if assignedMacroDropdown and assignedMacroDropdown.Refresh then
-        assignedMacroDropdown:Refresh(macroNamesList())
+function TowerPlacementWatcher.GetLatest()
+    return TowerPlacementWatcher.history[#TowerPlacementWatcher.history]
+end
+
+function TowerPlacementWatcher.GetHistory(n)
+    n = n or TowerPlacementWatcher.maxHistory
+    local hist = TowerPlacementWatcher.history
+    if n >= #hist then return hist end
+    local out = {}
+    for i = math.max(1, #hist - n + 1), #hist do
+        table.insert(out, hist[i])
+    end
+    return out
+end
+
+function TowerPlacementWatcher.GetByUUID(uuid)
+    return TowerPlacementWatcher.indexByUUID[uuid]
+end
+
+function TowerPlacementWatcher.GetByName(name)
+    return TowerPlacementWatcher.indexByName[name] or {}
+end
+
+function TowerPlacementWatcher.WaitForNextPlacement(timeout)
+    local start = tick()
+    local lastCount = #TowerPlacementWatcher.history
+    while true do
+        if #TowerPlacementWatcher.history > lastCount then
+            return TowerPlacementWatcher.history[#TowerPlacementWatcher.history]
+        end
+        if timeout and tick() - start >= timeout then
+            return nil, "timeout"
+        end
+        task.wait(0.03)
+    end
+end
+
+function TowerPlacementWatcher.ResolveNameToUUID(name)
+    local byName = TowerPlacementWatcher.GetByName(name)
+    if byName and #byName > 0 then
+        return byName[#byName].uuid
+    end
+    if _G and _G.MacroGuidHelper then
+        for guid, info in pairs(_G.MacroGuidHelper._guidMap or {}) do
+            if info.path and tostring(info.path):lower():find(name:lower()) then
+                return guid
+            end
+        end
+    end
+    return nil
+end
+
+function TowerPlacementWatcher.GetCFrameForUUID(uuid)
+    local rec = TowerPlacementWatcher.GetByUUID(uuid)
+    if rec and rec.cframe then return rec.cframe end
+    return nil
+end
+
+startWatching()
+_G.TowerPlacementWatcher = TowerPlacementWatcher
+
+-- ======= Convenience: auto-attach placement data to macro events (optional) =======
+-- When recording, if a placement is detected shortly after a recorded input, append placement info to the last recorded event.
+local function tryAttachPlacementToRecording()
+    if not isRecording then return end
+    -- Wait briefly for placement to appear
+    local rec, err = TowerPlacementWatcher.WaitForNextPlacement(2)
+    if rec then
+        -- attach to last recorded event if exists
+        if currentRecording and #currentRecording > 0 then
+            local last = currentRecording[#currentRecording]
+            last.Placement = { name = rec.name, uuid = rec.uuid, cframe = rec.cframe }
+        end
+    end
+end
+
+-- Example: connect MacroEvent listener to detect placement captures and attach if recording
+MacroEvent.Event:Connect(function(data)
+    if data.EventType == "PlacementCaptured" then
+        -- placement captured; attach if recording
+        if isRecording and currentRecording and #currentRecording > 0 then
+            local last = currentRecording[#currentRecording]
+            last.Placement = { name = data.name, uuid = data.uuid, cframe = data.cframe }
+        end
     end
 end)
 
--- Create the custom recording UI now (so it's ready when recording starts)
-pcall(createRecordingStatusGui)
-pcall(createInfoPopupGui)
-
--- Final UI refreshes and safety checks
-pcall(function()
-    if macroDropdown and macroDropdown.Refresh then
-        macroDropdown:Refresh(macroNamesList())
+-- ======= Example playback listener (user should implement actual actions) =======
+-- This sample shows how to react to MacroEvent during playback.
+-- It looks for events that include Placement info and calls PlaceTower.
+MacroEvent.Event:Connect(function(ev)
+    -- ev may be a playback event or a placement-captured event
+    if ev.EventType == "PlacementCaptured" then
+        -- handled elsewhere
+        return
     end
-    if assignedMacroDropdown and assignedMacroDropdown.Refresh then
-        assignedMacroDropdown:Refresh(macroNamesList())
+
+    -- If playback event includes Placement data, attempt to place tower
+    if ev and ev.Type and ev.Type == "Began" and ev.KeyCode and tostring(ev.KeyCode) == "Enum.KeyCode.ButtonR2" then
+        -- example: ignore; placeholder for custom logic
+    end
+    -- If the macro event contains a Placement payload (when recorded), handle it
+    if ev and ev.Placement then
+        local p = ev.Placement
+        if p.uuid and p.cframe then
+            local ok, res = MacroGuidHelper.PlaceTower(p.uuid, p.cframe)
+            if not ok and debugX then
+                warn("PlaceTower failed:", res)
+            end
+        end
     end
 end)
 
+-- ======= Finalize =======
 Rayfield:LoadConfiguration()
 
--- Expose internals for debugging and external control (safe references)
-return {
-    _internal = {
-        macros = macros,
-        saveToDisk = saveToDisk,
-        loadFromDisk = loadFromDisk,
-        saveMacros = saveMacros,
-        loadMacros = loadMacros,
-        buildHotbarLookup = buildHotbarLookup,
-        startRecording = startRecording,
-        stopRecording = stopRecording,
-        startPlayback = startPlayback,
-        stopPlayback = stopPlayback,
-        startAutoUpgrade = startAutoUpgrade_Debug,
-        stopAutoUpgrade = stopAutoUpgrade_Debug,
-        startMaps = startMapsLoop,
-        stopMaps = stopMapsLoop,
-        refreshMacroDropdowns = refreshAllMacroDropdowns,
-        refreshAssignedMacroOptions = refreshAssignedMacroOptions,
-        persistAssignedMappings = persistAssignedMappings,
-        _showRecordingUI = showRecordingStatus,
-        _setMacroInfo = setMacroInfo,
-        _currentPlaying = function() return currentPlaying end,
-        _playbackThread = function() return playbackThread end,
-    }
-}
+-- Print summary for debugging
+if debugX then
+    print("[MacroSystem] Initialized.")
+    print("[MacroSystem] Macros available:", #MacroNames)
+    print("[MacroSystem] MacroEvent located at:", MacroEvent and MacroEvent:GetFullName() or "nil")
+    if MacroGuidHelper._spawnRemote then
+        print("[MacroGuidHelper] Spawn remote found at:", MacroGuidHelper._spawnRemote:GetFullName())
+    else
+        print("[MacroGuidHelper] Spawn remote not found yet.")
+    end
+end
