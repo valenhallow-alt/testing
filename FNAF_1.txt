@@ -1,4 +1,4 @@
--- UnHub | by LE_GO89 (with Lounge tab populated and Lilypad dropdown removed)
+-- UnHub | by LE_GO89 (Lounge buy moved to Main; Anti-AFK always enabled)
 local Rayfield = loadstring(game:HttpGet('https://raw.githubusercontent.com/UnHub-LEGO/Scripts/refs/heads/main/Rayfield%20Library'))()
 
 local Window = Rayfield:CreateWindow({
@@ -37,6 +37,17 @@ local TeleportService = game:GetService("TeleportService")
 local plr = game.Players.LocalPlayer
 local Players = game.Players
 local AutoBuy1, AutoPickUp, AutoBuy3, RunAntiAfk = false, false, false, nil
+local BuyLoungeItems = false
+
+-- Anti-AFK: always enabled (no toggle in UI)
+do
+    local vu = game:GetService("VirtualUser")
+    RunAntiAfk = game:GetService("Players").LocalPlayer.Idled:Connect(function()
+        vu:Button2Down(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+        wait(1)
+        vu:Button2Up(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+    end)
+end
 
 local multipliers = {
     K = 1e3,
@@ -97,51 +108,20 @@ for i, v in pairs(Ribbit) do
     table.insert(RibbitList, v[1])
 end
 
+-- MAIN tab: only Buy Lounge Items toggle (Anti-AFK remains enabled)
 local Main = Window:CreateTab("Main", 125058207637011)
 Main:CreateSection("Main")
 
-Main:CreateToggle({Name = "Anti Afk Bypass", CurrentValue = false, Flag = "Toggle1", Callback = function(Value)
-    local vu = game:GetService("VirtualUser")
-    if Value then
-        RunAntiAfk = game:GetService("Players").LocalPlayer.Idled:connect(function()
-            vu:Button2Down(Vector2.new(0,0),workspace.CurrentCamera.CFrame)
-            wait(1)
-            vu:Button2Up(Vector2.new(0,0),workspace.CurrentCamera.CFrame)
-        end)
-    else
-        if RunAntiAfk then
-            RunAntiAfk:Disconnect()
-            RunAntiAfk = nil
-        end
-    end
-end})
+Main:CreateToggle({
+    Name = "Buy Lounge Items",
+    CurrentValue = false,
+    Flag = "Buy_Lounge_Items",
+    Callback = function(Value)
+        BuyLoungeItems = Value
+    end,
+})
 
-Main:CreateInput({Name = "Server", CurrentValue = "", PlaceholderText = "ServerId", RemoveTextAfterFocusLost = true, Callback = function(Value)
-    TeleportService:TeleportToPlaceInstance(game.PlaceId, Value, plr)
-end})
-
-Main:CreateButton({Name = "Rejoin", Callback = function()
-    TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, plr)
-end})
-
-Main:CreateButton({Name = "Server Hop", Callback = function()
-    local servers = {}
-    local req = game:HttpGet("https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Desc&limit=100&excludeFullGames=true")
-    local body = HttpService:JSONDecode(req)
-
-    if body and body.data then
-        for i, v in next, body.data do
-            if type(v) == "table" and tonumber(v.playing) and tonumber(v.maxPlayers) and v.playing < v.maxPlayers and v.id ~= JobId then
-                table.insert(servers, 1, v.id)
-            end
-        end
-    end
-
-    if #servers > 0 then
-        TeleportService:TeleportToPlaceInstance(game.PlaceId, servers[math.random(1, #servers)], plr)
-    end
-end})
-
+-- FARM tab
 local Farm = Window:CreateTab("Farm", 125058207637011)
 Farm:CreateSection("Farm")
 
@@ -194,6 +174,7 @@ Farm:CreateButton({Name = "Place All Tadpole", Callback = function()
     end
 end})
 
+-- SHOP tab (Lilypad dropdown removed; Tadpoles and Ribbit remain)
 local Shop = Window:CreateTab("Shop", 125058207637011)
 Shop:CreateSection("Shop")
 
@@ -221,7 +202,7 @@ Shop:CreateToggle({Name = "Auto Buy Ribbit", CurrentValue = false, Flag = "Toggl
     AutoBuy3 = Value
 end})
 
--- Lounge tab and dropdowns (Lilypad items sorted into categories)
+-- LOUNGE tab and dropdowns (Lilypad items sorted into categories)
 local Lounge = Window:CreateTab("Lounge", 125058207637011)
 Lounge:CreateSection("Lounge")
 
@@ -293,7 +274,9 @@ Lounge:CreateButton({Name = "Clear All Selections", Callback = function()
     ddObjects:Set({}); ddPath:Set({}); ddFence:Set({}); ddPlant:Set({}); ddRock:Set({}); ddBuild:Set({}); ddArch:Set({}); ddLight:Set({})
 end})
 
+-- Render loop: handle auto-buy logic for Tadpoles, Ribbit, Pickup, Sell, and Buy Lounge Items
 RunService.RenderStepped:Connect(function(deltaTime)
+    -- Tadpoles auto-buy (unchanged)
     if AutoBuy1 then
         for _, v in pairs(Frog) do
             if ShopFrog and table.find(ShopFrog, v[1]) and NumberCoverter(plr.leaderstats.Ribbles.Value) >= v[3] then
@@ -301,6 +284,8 @@ RunService.RenderStepped:Connect(function(deltaTime)
             end
         end
     end
+
+    -- Ribbit auto-buy (unchanged)
     if AutoBuy3 then
         for _, v in pairs(Ribbit) do
             if ShopRibbit and table.find(ShopRibbit, v[1]) and NumberCoverter(plr.leaderstats.Ribbles.Value) >= v[2] then
@@ -308,6 +293,8 @@ RunService.RenderStepped:Connect(function(deltaTime)
             end
         end
     end
+
+    -- Auto pickup
     if AutoPickUp then
         for i, v in pairs(plr.Plot.Value.Entities:GetChildren()) do
             if v:IsA("Part") then
@@ -315,7 +302,35 @@ RunService.RenderStepped:Connect(function(deltaTime)
             end
         end
     end
+
+    -- Auto sell
     if AutoSell then
         game:GetService("ReplicatedStorage"):WaitForChild("HopNSellComms"):WaitForChild("RE"):WaitForChild("SellAll"):FireServer()
+    end
+
+    -- Buy Lounge Items: combine all selected lounge dropdowns and purchase matching Lilypad shop items
+    if BuyLoungeItems then
+        -- build a set of selected names for quick lookup
+        local selected = {}
+        for _, name in ipairs(LoungeObjects or {}) do selected[name] = true end
+        for _, name in ipairs(LoungePathways or {}) do selected[name] = true end
+        for _, name in ipairs(LoungeFences or {}) do selected[name] = true end
+        for _, name in ipairs(LoungePlants or {}) do selected[name] = true end
+        for _, name in ipairs(LoungeRocks or {}) do selected[name] = true end
+        for _, name in ipairs(LoungeBuildings or {}) do selected[name] = true end
+        for _, name in ipairs(LoungeArches or {}) do selected[name] = true end
+        for _, name in ipairs(LoungeLighting or {}) do selected[name] = true end
+
+        -- iterate Lilypad shop items and purchase if selected and affordable
+        for _, item in pairs(Lilypad) do
+            local itemName = item[1]
+            local itemPrice = item[2] or 0
+            if selected[itemName] and NumberCoverter(plr.leaderstats.Ribbles.Value) >= itemPrice then
+                -- safe pcall to avoid errors if server call fails
+                pcall(function()
+                    game:GetService("ReplicatedStorage"):WaitForChild("LilypadLoungeComms"):WaitForChild("RF"):WaitForChild("OnPurchaseItem"):InvokeServer(itemName)
+                end)
+            end
+        end
     end
 end)
