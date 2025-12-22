@@ -1,5 +1,16 @@
--- UnHub | by LE_GO89 (updated: divider, Ribbit rename, theme DarkBlue)
+-- Safely destroy any previously created Rayfield UI (put this before loading the library)
+if _G.RayfieldInstance then
+    pcall(function()
+        if type(_G.RayfieldInstance.Destroy) == "function" then
+            _G.RayfieldInstance:Destroy()
+        end
+    end)
+    _G.RayfieldInstance = nil
+end
+
+-- UnHub | by LE_GO89 (final consolidated script with moved lounge buttons)
 local Rayfield = loadstring(game:HttpGet('https://raw.githubusercontent.com/UnHub-LEGO/Scripts/refs/heads/main/Rayfield%20Library'))()
+_G.RayfieldInstance = Rayfield
 
 local Window = Rayfield:CreateWindow({
    Name = "UnHub | by LE_GO89",
@@ -36,7 +47,9 @@ local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 local plr = game.Players.LocalPlayer
 local Players = game.Players
-local AutoBuy1, AutoPickUp, AutoBuy3, RunAntiAfk = false, false, false, nil
+
+-- Feature toggles / state
+local AutoBuyTadpoles, AutoPickUp, AutoBuyGears, RunAntiAfk = false, false, false, nil
 local BuyLoungeItems = false
 
 -- Anti-AFK: always enabled (no toggle in UI)
@@ -58,19 +71,16 @@ local multipliers = {
 
 local function NumberCoverter(text)
     text = tostring(text):upper()
-
     local value, suffix = text:match("([%d%.]+)%s*([KMBT]?)")
     value = tonumber(value)
     if not value then return nil end
-
     if suffix ~= "" and multipliers[suffix] then
         return value * multipliers[suffix]
     end
-
     return value
 end
 
--- Build Frog (Tadpole) shop data from GUI
+-- Build Tadpole (Frog) shop data from GUI
 local Frog = {}
 local FrogList = {}
 local ShopFrog = {}
@@ -101,7 +111,7 @@ if plr and plr.PlayerGui and plr.PlayerGui:FindFirstChild("Lilypad Lounge_Shop")
     end
 end
 
--- Ribbit shop (GUI data)
+-- Ribbit (Gears) shop data
 local Ribbit = {}
 local RibbitList = {}
 local ShopRibbit = {}
@@ -130,23 +140,21 @@ Main:CreateToggle({
     end,
 })
 
--- Auto Buy Tadpoles moved to Main and renamed
 Main:CreateToggle({
     Name = "Auto Buy Tadpoles",
     CurrentValue = false,
     Flag = "Auto_Buy_Tadpoles",
     Callback = function(Value)
-        AutoBuy1 = Value
+        AutoBuyTadpoles = Value
     end,
 })
 
--- Auto Buy Ribbit moved to Main and renamed to Auto Buy Gears
 Main:CreateToggle({
     Name = "Auto Buy Gears",
     CurrentValue = false,
     Flag = "Auto_Buy_Gears",
     Callback = function(Value)
-        AutoBuy3 = Value
+        AutoBuyGears = Value
     end,
 })
 
@@ -154,11 +162,11 @@ Main:CreateToggle({
 local Farm = Window:CreateTab("Farm", 125058207637011)
 Farm:CreateSection("Farm")
 
-Farm:CreateToggle({Name = "Auto Sell All", CurrentValue = false, Flag = "Toggle1", Callback = function(Value)
+Farm:CreateToggle({Name = "Auto Sell All", CurrentValue = false, Flag = "Auto_Sell_All", Callback = function(Value)
     AutoSell = Value
 end})
 
-Farm:CreateToggle({Name = "Auto Pick Up", CurrentValue = false, Flag = "Toggle1", Callback = function(Value)
+Farm:CreateToggle({Name = "Auto Pick Up", CurrentValue = false, Flag = "Auto_Pick_Up", Callback = function(Value)
     AutoPickUp = Value
 end})
 
@@ -177,7 +185,6 @@ Farm:CreateButton({Name = "Sell All", Callback = function()
 end})
 
 Farm:CreateButton({Name = "Place All Tadpole", Callback = function()
-    -- iterate over Backpack and Character to find tadpole tools
     local containers = {}
     for _, item in pairs(plr.Backpack:GetChildren()) do table.insert(containers, item) end
     if plr.Character then
@@ -187,17 +194,13 @@ Farm:CreateButton({Name = "Place All Tadpole", Callback = function()
     for _, v in pairs(containers) do
         if v:FindFirstChild("TadpoleToolComms") then
             task.spawn(function()
-                local success, err = pcall(function()
+                pcall(function()
                     local args = {
                         plr.Plot.Value:WaitForChild("SwimableAreas"):WaitForChild("Pond1"):WaitForChild("PlaceArea"),
                         vector.create(0, 0, 0)
                     }
                     v:WaitForChild("TadpoleToolComms"):WaitForChild("RE"):WaitForChild("RequestPlace"):FireServer(unpack(args))
                 end)
-                if not success then
-                    -- optional: warn in output if needed
-                    -- warn("Place All Tadpole error: "..tostring(err))
-                end
             end)
         end
     end
@@ -207,7 +210,7 @@ end})
 local Shop = Window:CreateTab("Shop", 125058207637011)
 Shop:CreateSection("Shop")
 
--- Tadpole dropdown: explicit display order
+-- Tadpole dropdown: explicit display order requested
 local TadpoleOptions = {
     "Pond Tadpole","Wood Tadpole","Dewback Tadpole","Bullfrog Tadpole","Dart Tadpole",
     "Mossback Tadpole","Frogberry Tadpole","Budtop Tadpole","Mushtoad Tadpole","Sugar Tadpole",
@@ -254,6 +257,38 @@ local RibbitDrop = Shop:CreateDropdown({
 -- Rename Select All Ribbit to "Select All Gears"
 Shop:CreateButton({Name = "Select All Gears", Callback = function()
     RibbitDrop:Set(RibbitOptions)
+end})
+
+-- NEW divider for the lounge buttons section
+local Divider2 = Shop:CreateDivider()
+
+-- Move the lounge select/clear buttons into the Shop tab (new divided section)
+-- These callbacks reference the lounge dropdown variables which are defined later;
+-- when the buttons are pressed the lounge dropdowns will already exist.
+Shop:CreateButton({Name = "Select All Lounge Items", Callback = function()
+    if ddObjects then
+        ddObjects:Set(ObjectsOptions)
+        ddPath:Set(PathwaysOptions)
+        ddFence:Set(FencesOptions)
+        ddPlant:Set(PlantsOptions)
+        ddRock:Set(RocksOptions)
+        ddBuild:Set(BuildingsOptions)
+        ddArch:Set(ArchesOptions)
+        ddLight:Set(LightingOptions)
+    end
+end})
+
+Shop:CreateButton({Name = "Unselect all Lounge Items", Callback = function()
+    if ddObjects then
+        ddObjects:Set({})
+        ddPath:Set({})
+        ddFence:Set({})
+        ddPlant:Set({})
+        ddRock:Set({})
+        ddBuild:Set({})
+        ddArch:Set({})
+        ddLight:Set({})
+    end
 end})
 
 -- LOUNGE tab and dropdowns (Lilypad items sorted into categories)
@@ -317,21 +352,12 @@ local ddBuild  = Lounge:CreateDropdown({Name = "Buildings", Options = BuildingsO
 local ddArch   = Lounge:CreateDropdown({Name = "Arches",    Options = ArchesOptions,    CurrentOption = {"None"}, MultipleOptions = true, Flag = "Lounge_Arches",    Callback = function(Value) LoungeArches    = Value end})
 local ddLight  = Lounge:CreateDropdown({Name = "Lighting",  Options = LightingOptions,  CurrentOption = {"None"}, MultipleOptions = true, Flag = "Lounge_Lighting",  Callback = function(Value) LoungeLighting  = Value end})
 
--- Helper buttons: Select All and Clear All for convenience
-Lounge:CreateButton({Name = "Select All All", Callback = function()
-    ddObjects:Set(ObjectsOptions); ddPath:Set(PathwaysOptions); ddFence:Set(FencesOptions);
-    ddPlant:Set(PlantsOptions); ddRock:Set(RocksOptions); ddBuild:Set(BuildingsOptions);
-    ddArch:Set(ArchesOptions); ddLight:Set(LightingOptions)
-end})
-
-Lounge:CreateButton({Name = "Clear All Selections", Callback = function()
-    ddObjects:Set({}); ddPath:Set({}); ddFence:Set({}); ddPlant:Set({}); ddRock:Set({}); ddBuild:Set({}); ddArch:Set({}); ddLight:Set({})
-end})
+-- Note: the lounge select/clear buttons were moved to the Shop tab (above)
 
 -- Render loop: handle auto-buy logic for Tadpoles, Gears (Ribbit), Pickup, Sell, and Buy Lounge Items
 RunService.RenderStepped:Connect(function(deltaTime)
-    -- Tadpoles auto-buy (AutoBuy1 controlled by Main toggle "Auto Buy Tadpoles")
-    if AutoBuy1 then
+    -- Tadpoles auto-buy (AutoBuyTadpoles controlled by Main toggle "Auto Buy Tadpoles")
+    if AutoBuyTadpoles then
         for _, v in pairs(Frog) do
             if ShopFrog and table.find(ShopFrog, v[1]) and NumberCoverter(plr.leaderstats.Ribbles.Value) >= v[3] then
                 pcall(function()
@@ -341,8 +367,8 @@ RunService.RenderStepped:Connect(function(deltaTime)
         end
     end
 
-    -- Gears auto-buy (AutoBuy3 controlled by Main toggle "Auto Buy Gears")
-    if AutoBuy3 then
+    -- Gears auto-buy (AutoBuyGears controlled by Main toggle "Auto Buy Gears")
+    if AutoBuyGears then
         for _, v in pairs(Ribbit) do
             if ShopRibbit and table.find(ShopRibbit, v[1]) and NumberCoverter(plr.leaderstats.Ribbles.Value) >= v[2] then
                 pcall(function()
@@ -368,7 +394,6 @@ RunService.RenderStepped:Connect(function(deltaTime)
 
     -- Buy Lounge Items: combine all selected lounge dropdowns and purchase matching Lilypad shop items
     if BuyLoungeItems then
-        -- build a set of selected names for quick lookup
         local selected = {}
         for _, name in ipairs(LoungeObjects or {}) do selected[name] = true end
         for _, name in ipairs(LoungePathways or {}) do selected[name] = true end
@@ -379,12 +404,10 @@ RunService.RenderStepped:Connect(function(deltaTime)
         for _, name in ipairs(LoungeArches or {}) do selected[name] = true end
         for _, name in ipairs(LoungeLighting or {}) do selected[name] = true end
 
-        -- iterate Lilypad shop items and purchase if selected and affordable
         for _, item in pairs(Lilypad) do
             local itemName = item[1]
             local itemPrice = item[2] or 0
             if selected[itemName] and NumberCoverter(plr.leaderstats.Ribbles.Value) >= itemPrice then
-                -- safe pcall to avoid errors if server call fails
                 pcall(function()
                     game:GetService("ReplicatedStorage"):WaitForChild("LilypadLoungeComms"):WaitForChild("RF"):WaitForChild("OnPurchaseItem"):InvokeServer(itemName)
                 end)
