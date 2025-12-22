@@ -1,4 +1,4 @@
--- UnHub | by LE_GO89 (Lounge buy moved to Main; Anti-AFK always enabled)
+-- UnHub | by LE_GO89 (updated: Tadpole order + Auto Buy Tadpoles moved to Main)
 local Rayfield = loadstring(game:HttpGet('https://raw.githubusercontent.com/UnHub-LEGO/Scripts/refs/heads/main/Rayfield%20Library'))()
 
 local Window = Rayfield:CreateWindow({
@@ -70,45 +70,54 @@ local function NumberCoverter(text)
     return value
 end
 
+-- Build Frog (Tadpole) shop data from GUI
 local Frog = {}
 local FrogList = {}
 local ShopFrog = {}
 
-for i, v in pairs(plr.PlayerGui["Tadpole Trove_Shop"].MainContainer.Container.Frame.Body.Items:GetChildren()) do
-    if v:IsA("Frame") and v.Name:find(" Tadpole") then
-        table.insert(Frog, {v.Name, v.Name:gsub(" Tadpole", " Frog"), tonumber(NumberCoverter(v.Right.PriceSection.Button.Amount.Text))})
+if plr and plr.PlayerGui and plr.PlayerGui:FindFirstChild("Tadpole Trove_Shop") then
+    for i, v in pairs(plr.PlayerGui["Tadpole Trove_Shop"].MainContainer.Container.Frame.Body.Items:GetChildren()) do
+        if v:IsA("Frame") and v.Name:find(" Tadpole") then
+            table.insert(Frog, {v.Name, v.Name:gsub(" Tadpole", " Frog"), tonumber(NumberCoverter(v.Right.PriceSection.Button.Amount.Text))})
+        end
+    end
+    for i, v in pairs(Frog) do
+        table.insert(FrogList, v[1])
     end
 end
-for i, v in pairs(Frog) do
-    table.insert(FrogList, v[1])
-end
 
+-- Lilypad shop items (used by Buy Lounge Items)
 local Lilypad = {}
 local LilypadList = {}
 
-for i, v in pairs(game:GetService("Players").LocalPlayer.PlayerGui["Lilypad Lounge_Shop"].MainContainer.Container.Frame.Body.Items:GetChildren()) do
-    if v:IsA("Frame") then
-        table.insert(Lilypad, {v.Name, tonumber(NumberCoverter(v.Right.PriceSection.Button.Amount.Text))})
+if plr and plr.PlayerGui and plr.PlayerGui:FindFirstChild("Lilypad Lounge_Shop") then
+    for i, v in pairs(plr.PlayerGui["Lilypad Lounge_Shop"].MainContainer.Container.Frame.Body.Items:GetChildren()) do
+        if v:IsA("Frame") then
+            table.insert(Lilypad, {v.Name, tonumber(NumberCoverter(v.Right.PriceSection.Button.Amount.Text))})
+        end
+    end
+    for i, v in pairs(Lilypad) do
+        table.insert(LilypadList, v[1])
     end
 end
-for i, v in pairs(Lilypad) do
-    table.insert(LilypadList, v[1])
-end
 
+-- Ribbit shop
 local Ribbit = {}
 local RibbitList = {}
 local ShopRibbit = {}
 
-for i, v in pairs(game:GetService("Players").LocalPlayer.PlayerGui["Ribbit Rack_Shop"].MainContainer.Container.Frame.Body.Items:GetChildren()) do
-    if v:IsA("Frame") then
-        table.insert(Ribbit, {v.Name, tonumber(NumberCoverter(v.Right.PriceSection.Button.Amount.Text))})
+if plr and plr.PlayerGui and plr.PlayerGui:FindFirstChild("Ribbit Rack_Shop") then
+    for i, v in pairs(plr.PlayerGui["Ribbit Rack_Shop"].MainContainer.Container.Frame.Body.Items:GetChildren()) do
+        if v:IsA("Frame") then
+            table.insert(Ribbit, {v.Name, tonumber(NumberCoverter(v.Right.PriceSection.Button.Amount.Text))})
+        end
+    end
+    for i, v in pairs(Ribbit) do
+        table.insert(RibbitList, v[1])
     end
 end
-for i, v in pairs(Ribbit) do
-    table.insert(RibbitList, v[1])
-end
 
--- MAIN tab: only Buy Lounge Items toggle (Anti-AFK remains enabled)
+-- MAIN tab: Buy Lounge Items + Auto Buy Tadpoles (Anti-AFK remains enabled)
 local Main = Window:CreateTab("Main", 125058207637011)
 Main:CreateSection("Main")
 
@@ -118,6 +127,16 @@ Main:CreateToggle({
     Flag = "Buy_Lounge_Items",
     Callback = function(Value)
         BuyLoungeItems = Value
+    end,
+})
+
+-- Auto Buy Tadpoles moved to Main and renamed
+Main:CreateToggle({
+    Name = "Auto Buy Tadpoles",
+    CurrentValue = false,
+    Flag = "Auto_Buy_Tadpoles",
+    Callback = function(Value)
+        AutoBuy1 = Value
     end,
 })
 
@@ -178,17 +197,31 @@ end})
 local Shop = Window:CreateTab("Shop", 125058207637011)
 Shop:CreateSection("Shop")
 
-local Tadpoles = Shop:CreateDropdown({Name = "Tadpoles Trove", Options = FrogList, CurrentOption = {"None"}, MultipleOptions = true, Flag = "Dropdown1", Callback = function(Value)
-    ShopFrog = Value
+-- Tadpole dropdown: use explicit display order requested by user
+local TadpoleOptions = {
+    "Pond Tadpole","Wood Tadpole","Dewback Tadpole","Bullfrog Tadpole","Dart Tadpole",
+    "Mossback Tadpole","Frogberry Tadpole","Budtop Tadpole","Mushtoad Tadpole","Sugar Tadpole",
+    "Glacier Tadpole","Molten Tadpole","Chronogear Tadpole","Voltcloud Tadpole","Crystalback Tadpole",
+    "Shadow Hopper Tadpole","Astro Tadpole","Candelune Tadpole","Frogzilla Tadpole","Cheeseburger Tadpole",
+    "Runesage Tadpole","Arcana Tadpole","Moltrix Tadpole","Bunblossom Tadpole","Jester Tadpole","Archangel Tadpole"
+}
+
+local Tadpoles = Shop:CreateDropdown({
+    Name = "Tadpoles Trove",
+    Options = TadpoleOptions,
+    CurrentOption = {"None"},
+    MultipleOptions = true,
+    Flag = "Dropdown_Tadpoles",
+    Callback = function(Value)
+        ShopFrog = Value
+    end
+})
+
+Shop:CreateButton({Name = "Select All Tadpoles", Callback = function()
+    Tadpoles:Set(TadpoleOptions)
 end})
 
-Shop:CreateButton({Name = "Select All", Callback = function()
-    Tadpoles:Set(FrogList)
-end})
-
-Shop:CreateToggle({Name = "Auto Buy", CurrentValue = false, Flag = "Toggle1", Callback = function(Value)
-    AutoBuy1 = Value
-end})
+-- Note: Auto Buy Tadpoles toggle was moved to Main (AutoBuy1 variable)
 
 local RibbitDrop = Shop:CreateDropdown({Name = "Ribbit Rack", Options = RibbitList, CurrentOption = {"None"}, MultipleOptions = true, Flag = "Dropdown3", Callback = function(Value)
     ShopRibbit = Value
@@ -276,11 +309,13 @@ end})
 
 -- Render loop: handle auto-buy logic for Tadpoles, Ribbit, Pickup, Sell, and Buy Lounge Items
 RunService.RenderStepped:Connect(function(deltaTime)
-    -- Tadpoles auto-buy (unchanged)
+    -- Tadpoles auto-buy (AutoBuy1 controlled by Main toggle "Auto Buy Tadpoles")
     if AutoBuy1 then
         for _, v in pairs(Frog) do
             if ShopFrog and table.find(ShopFrog, v[1]) and NumberCoverter(plr.leaderstats.Ribbles.Value) >= v[3] then
-                game:GetService("ReplicatedStorage"):WaitForChild("TadpoleShopComms"):WaitForChild("RF"):WaitForChild("OnPurchaseItem"):InvokeServer(v[1], v[2])
+                pcall(function()
+                    game:GetService("ReplicatedStorage"):WaitForChild("TadpoleShopComms"):WaitForChild("RF"):WaitForChild("OnPurchaseItem"):InvokeServer(v[1], v[2])
+                end)
             end
         end
     end
@@ -289,7 +324,9 @@ RunService.RenderStepped:Connect(function(deltaTime)
     if AutoBuy3 then
         for _, v in pairs(Ribbit) do
             if ShopRibbit and table.find(ShopRibbit, v[1]) and NumberCoverter(plr.leaderstats.Ribbles.Value) >= v[2] then
-                game:GetService("ReplicatedStorage"):WaitForChild("GearShopComms"):WaitForChild("RF"):WaitForChild("OnPurchaseItem"):InvokeServer(v[1])
+                pcall(function()
+                    game:GetService("ReplicatedStorage"):WaitForChild("GearShopComms"):WaitForChild("RF"):WaitForChild("OnPurchaseItem"):InvokeServer(v[1])
+                end)
             end
         end
     end
