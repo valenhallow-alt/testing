@@ -8,22 +8,20 @@ if _G.RayfieldInstance then
     _G.RayfieldInstance = nil
 end
 
--- UnHub | by LE_GO89 (updated: robust toggle start/stop behavior)
+--  (updated: robust toggle start/stop behavior)
 local Rayfield = loadstring(game:HttpGet('https://raw.githubusercontent.com/UnHub-LEGO/Scripts/refs/heads/main/Rayfield%20Library'))()
 _G.RayfieldInstance = Rayfield
 
 local Window = Rayfield:CreateWindow({
-   Name = "UnHub | by LE_GO89",
-   FileName = "UnHub",
+   Name = "My Frog Pond",
+   FileName = "frogsHub",
    Icon = 0,
-   LoadingTitle = "UnHub",
-   LoadingSubtitle = "by LE_GO89",
-   Theme = "DarkBlue",
+  Theme = "DarkBlue",
    ToggleUIKeybind = "H",
    ConfigurationSaving = {
       Enabled = true,
       FolderName = nil,
-      FileName = "UnHub"
+      FileName = "frogsHub"
    },
    Discord = {
       Enabled = false,
@@ -668,3 +666,4 @@ do
         end
     end)
 end
+
