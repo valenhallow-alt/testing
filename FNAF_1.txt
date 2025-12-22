@@ -8,7 +8,7 @@ if _G.RayfieldInstance then
     _G.RayfieldInstance = nil
 end
 
--- UnHub | by LE_GO89 (consolidated final script)
+-- UnHub | by LE_GO89 (Farm items moved to Main; Sell All button removed)
 local Rayfield = loadstring(game:HttpGet('https://raw.githubusercontent.com/UnHub-LEGO/Scripts/refs/heads/main/Rayfield%20Library'))()
 _G.RayfieldInstance = Rayfield
 
@@ -53,6 +53,7 @@ local AutoBuyTadpoles, AutoPickUp, AutoBuyGears, RunAntiAfk = false, false, fals
 local BuyLoungeItems = false
 local PlaceAllTadpoles = false
 local IgnorePickupFor = {} -- table of selected names to ignore
+local AutoSell = false
 
 -- Anti-AFK: always enabled (no toggle in UI)
 do
@@ -147,7 +148,7 @@ if plr and plr.PlayerGui and plr.PlayerGui:FindFirstChild("Ribbit Rack_Shop") th
     end
 end
 
--- MAIN tab: Buy Lounge Items + Auto Buy Tadpoles + Auto Buy Gears (Anti-AFK remains enabled)
+-- MAIN tab: includes previous Main items plus Farm items moved here
 local Main = Window:CreateTab("Main", 125058207637011)
 Main:CreateSection("Main")
 
@@ -178,20 +179,18 @@ Main:CreateToggle({
     end,
 })
 
--- FARM tab
-local Farm = Window:CreateTab("Farm", 125058207637011)
-Farm:CreateSection("Farm")
+-- Farm items moved to Main
 
-Farm:CreateToggle({Name = "Auto Sell All", CurrentValue = false, Flag = "Auto_Sell_All", Callback = function(Value)
+Main:CreateToggle({Name = "Auto Sell All", CurrentValue = false, Flag = "Auto_Sell_All", Callback = function(Value)
     AutoSell = Value
 end})
 
-Farm:CreateToggle({Name = "Auto Pick Up", CurrentValue = false, Flag = "Auto_Pick_Up", Callback = function(Value)
+Main:CreateToggle({Name = "Auto Pick Up", CurrentValue = false, Flag = "Auto_Pick_Up", Callback = function(Value)
     AutoPickUp = Value
 end})
 
--- Ignore Pickup dropdown: display order matches Tadpoles Trove (use FrogNames as requested)
-local IgnoreDropdown = Farm:CreateDropdown({
+-- Ignore Pickup dropdown under Main (display order matches FrogNames)
+local IgnoreDropdown = Main:CreateDropdown({
     Name = "Ignore Pickup for",
     Options = FrogNames,
     CurrentOption = {"None"},
@@ -202,8 +201,8 @@ local IgnoreDropdown = Farm:CreateDropdown({
     end
 })
 
--- Place All Tadpoles: changed from button to toggle
-Farm:CreateToggle({
+-- Place All Tadpoles: toggle under Main (was in Farm)
+Main:CreateToggle({
     Name = "Place All Tadpoles",
     CurrentValue = false,
     Flag = "Place_All_Tadpoles",
@@ -241,9 +240,7 @@ Farm:CreateToggle({
     end
 })
 
-Farm:CreateButton({Name = "Sell All", Callback = function()
-    game:GetService("ReplicatedStorage"):WaitForChild("HopNSellComms"):WaitForChild("RE"):WaitForChild("SellAll"):FireServer()
-end})
+-- Note: Sell All button removed per request (toggle remains)
 
 -- SHOP tab (Lilypad dropdown removed; Tadpoles and Ribbit remain)
 local Shop = Window:CreateTab("Shop", 125058207637011)
@@ -442,7 +439,7 @@ RunService.RenderStepped:Connect(function(deltaTime)
         end
     end
 
-    -- Auto sell
+    -- Auto sell (toggle only; Sell All button removed)
     if AutoSell then
         game:GetService("ReplicatedStorage"):WaitForChild("HopNSellComms"):WaitForChild("RE"):WaitForChild("SellAll"):FireServer()
     end
