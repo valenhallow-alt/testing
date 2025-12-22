@@ -1,852 +1,255 @@
--- Full Macro + GUID + Placement watcher + Rayfield UI script (no Rayfield boxes)
--- Paste into a LocalScript or run via your executor.
-
--- ======= Configuration =======
-local debugX = true
-
--- ======= Rayfield load =======
-local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+local Rayfield = loadstring(game:HttpGet('https://raw.githubusercontent.com/UnHub-LEGO/Scripts/refs/heads/main/Rayfield%20Library'))()
 
 local Window = Rayfield:CreateWindow({
-   Name = "Rayfield Example Window",
+   Name = "UnHub | by LE_GO89",
+   FileName = "UnHub",
    Icon = 0,
-   LoadingTitle = "Rayfield Interface Suite",
-   LoadingSubtitle = "by Sirius",
+   LoadingTitle = "UnHub",
+   LoadingSubtitle = "by LE_GO89",
    Theme = "Default",
-   DisableRayfieldPrompts = false,
-   DisableBuildWarnings = false,
+   ToggleUIKeybind = "H",
    ConfigurationSaving = {
       Enabled = true,
       FolderName = nil,
-      FileName = "Big Hub"
+      FileName = "UnHub"
    },
    Discord = {
       Enabled = false,
-      Invite = "noinvitelink",
+      Invite = "",
       RememberJoins = true
    },
    KeySystem = false,
    KeySettings = {
-      Title = "Untitled",
-      Subtitle = "Key System",
-      Note = "No method of obtaining the key is provided",
+      Title = "UnHub",
+      Subtitle = "Key",
+      Note = "Get the key by visit the website and wait 5 sec copy the key",
       FileName = "Key",
-      SaveKey = true,
+      SaveKey = false,
       GrabKeyFromSite = false,
-      Key = {"Hello"}
-   }
+      Key = {"Hi"}
+    }
 })
 
-local Tab = Window:CreateTab("Main", 4483362458)
-local Section = Tab:CreateSection("Macros")
-
--- ======= Services & locals =======
-local Players = game:GetService("Players")
-local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local workspace = workspace
-local LocalPlayer = Players.LocalPlayer
+local HttpService = game:GetService("HttpService")
+local TeleportService = game:GetService("TeleportService")
+local plr = game.Players.LocalPlayer
+local Players = game.Players
+local AutoBuy1, AutoPickUp, AutoBuy2, AutoBuy3, RunAntiAfk = false, false, false, false, nil
 
--- ======= Bindable event for macro playback and placement capture =======
-local MacroEvent = Instance.new("BindableEvent")
-MacroEvent.Name = "MacroEvent"
-MacroEvent.Parent = ReplicatedStorage or workspace
-
--- ======= Macro storage & recording state =======
-local Macros = {}           -- name -> { events = {...} }
-local MacroNames = {}       -- list for dropdown
-local CurrentMacro = nil
-
-local isRecording = false
-local recordingStart = 0
-local currentRecording = {}
-local inputConn = nil
-
--- ======= Helper: refresh dropdown =======
-local MacroDropdown, MacroNameInput, PlayToggle -- forward refs
-
-local function refreshMacroDropdown()
-    MacroNames = {}
-    for name, _ in pairs(Macros) do
-        table.insert(MacroNames, name)
-    end
-    table.sort(MacroNames)
-    if MacroDropdown then
-        MacroDropdown:Refresh(MacroNames)
-        if not CurrentMacro or not Macros[CurrentMacro] then
-            CurrentMacro = MacroNames[1]
-            if CurrentMacro then
-                MacroDropdown:Set(CurrentMacro)
-            end
-        end
-    end
-end
-
-local function saveMacro(name, events)
-    if not name or name == "" then return false end
-    Macros[name] = { events = events }
-    refreshMacroDropdown()
-    return true
-end
-
-local function deleteMacro(name)
-    if not name or not Macros[name] then return false end
-    Macros[name] = nil
-    refreshMacroDropdown()
-    return true
-end
-
--- ======= Input recording handlers =======
-local function onInputBegan(input, gameProcessed)
-    if not isRecording then return end
-    local t = tick() - recordingStart
-    local record = {
-        Type = "Began",
-        UserInputType = input.UserInputType,
-        KeyCode = input.KeyCode,
-        Position = (input.Position and Vector2.new(input.Position.X, input.Position.Y)) or nil,
-        Time = t,
-        GameProcessed = gameProcessed
-    }
-    table.insert(currentRecording, record)
-end
-
-local function onInputEnded(input, gameProcessed)
-    if not isRecording then return end
-    local t = tick() - recordingStart
-    local record = {
-        Type = "Ended",
-        UserInputType = input.UserInputType,
-        KeyCode = input.KeyCode,
-        Position = (input.Position and Vector2.new(input.Position.X, input.Position.Y)) or nil,
-        Time = t,
-        GameProcessed = gameProcessed
-    }
-    table.insert(currentRecording, record)
-end
-
--- ======= Playback =======
-local function playMacroByName(name, repeats)
-    local macro = Macros[name]
-    if not macro or not macro.events or #macro.events == 0 then return end
-
-    coroutine.wrap(function()
-        local events = macro.events
-        for i, ev in ipairs(events) do
-            local waitTime
-            if i == 1 then
-                waitTime = ev.Time
-            else
-                waitTime = ev.Time - events[i-1].Time
-            end
-            if waitTime and waitTime > 0 then
-                task.wait(waitTime)
-            end
-            MacroEvent:Fire({
-                Name = name,
-                Index = i,
-                Type = ev.Type,
-                UserInputType = ev.UserInputType,
-                KeyCode = ev.KeyCode,
-                Position = ev.Position,
-                GameProcessed = ev.GameProcessed,
-                Timestamp = tick(),
-                Placement = ev.Placement -- may be nil
-            })
-        end
-
-        if repeats and PlayToggle and PlayToggle.CurrentValue then
-            task.wait(0.05)
-            if PlayToggle.CurrentValue then
-                playMacroByName(name, repeats)
-            end
-        end
-    end)()
-end
-
--- ======= Separate Recording GUI (ScreenGui) =======
-local function createRecordingGui()
-    local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 5)
-    if not playerGui then return nil end
-    local existing = playerGui:FindFirstChild("MacroRecordingGui")
-    if existing then return existing end
-
-    local screenGui = Instance.new("ScreenGui")
-    screenGui.Name = "MacroRecordingGui"
-    screenGui.ResetOnSpawn = false
-    screenGui.Parent = playerGui
-
-    local frame = Instance.new("Frame")
-    frame.Name = "RecordingFrame"
-    frame.Size = UDim2.new(0, 200, 0, 60)
-    frame.Position = UDim2.new(0.5, -100, 0.06, 0)
-    frame.AnchorPoint = Vector2.new(0.5, 0)
-    frame.BackgroundColor3 = Color3.fromRGB(28, 28, 28)
-    frame.BorderSizePixel = 0
-    frame.Parent = screenGui
-
-    local uicorner = Instance.new("UICorner")
-    uicorner.CornerRadius = UDim.new(0, 8)
-    uicorner.Parent = frame
-
-    local dot = Instance.new("Frame")
-    dot.Name = "Dot"
-    dot.Size = UDim2.new(0, 14, 0, 14)
-    dot.Position = UDim2.new(0, 12, 0.5, -7)
-    dot.BackgroundColor3 = Color3.fromRGB(255, 75, 75)
-    dot.BorderSizePixel = 0
-    dot.Parent = frame
-
-    local dotCorner = Instance.new("UICorner")
-    dotCorner.CornerRadius = UDim.new(1, 0)
-    dotCorner.Parent = dot
-
-    local label = Instance.new("TextLabel")
-    label.Name = "RecordingLabel"
-    label.Size = UDim2.new(0, 110, 1, 0)
-    label.Position = UDim2.new(0, 36, 0, 0)
-    label.BackgroundTransparency = 1
-    label.Text = "Recording"
-    label.TextColor3 = Color3.fromRGB(255, 255, 255)
-    label.Font = Enum.Font.GothamBold
-    label.TextSize = 18
-    label.TextXAlignment = Enum.TextXAlignment.Left
-    label.Parent = frame
-
-    local stopBtn = Instance.new("TextButton")
-    stopBtn.Name = "StopButton"
-    stopBtn.Size = UDim2.new(0, 56, 0, 28)
-    stopBtn.Position = UDim2.new(1, -68, 0.5, -14)
-    stopBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
-    stopBtn.Text = "Stop"
-    stopBtn.TextColor3 = Color3.fromRGB(255,255,255)
-    stopBtn.Font = Enum.Font.Gotham
-    stopBtn.TextSize = 14
-    stopBtn.Parent = frame
-
-    local stopCorner = Instance.new("UICorner")
-    stopCorner.CornerRadius = UDim.new(0, 6)
-    stopCorner.Parent = stopBtn
-
-    frame.Active = true
-    frame.Draggable = true
-
-    local pulseConnection
-    pulseConnection = RunService.Heartbeat:Connect(function()
-        if not dot or not dot.Parent then
-            if pulseConnection then pulseConnection:Disconnect() end
-            return
-        end
-        local s = (math.sin(tick()*6) + 1) / 2
-        local scale = 1 + s * 0.35
-        dot.Size = UDim2.new(0, 14 * scale, 0, 14 * scale)
-        dot.Position = UDim2.new(0, 12 - (7*(scale-1)), 0.5, -7 - (7*(scale-1)))
-    end)
-
-    stopBtn.MouseButton1Click:Connect(function()
-        if isRecording then
-            isRecording = false
-            if inputConn then
-                for _, c in ipairs(inputConn) do
-                    if c and c.Disconnect then c:Disconnect() end
-                end
-                inputConn = nil
-            end
-            local name = MacroNameInput and MacroNameInput.CurrentValue or ""
-            if name == nil or name == "" then
-                name = "macro_" .. tostring(math.floor(tick()))
-            end
-            local ok = saveMacro(name, currentRecording)
-            if ok then
-                MacroDropdown:Refresh(MacroNames)
-                MacroDropdown:Set(name)
-                CurrentMacro = name
-            end
-            screenGui.Enabled = false
-        end
-    end)
-
-    screenGui.Enabled = false
-    return screenGui
-end
-
-local RecordingGui = createRecordingGui()
-
--- ======= Rayfield UI elements (no Rayfield boxes) =======
-MacroDropdown = Tab:CreateDropdown({
-    Name = "MacroSelect",
-    Options = {},
-    CurrentOption = {},
-    MultipleOptions = false,
-    Flag = "MacroSelectFlag",
-    Callback = function(Options)
-        if type(Options) == "table" and #Options > 0 then
-            CurrentMacro = Options[1]
-            if MacroNameInput then MacroNameInput:Set(CurrentMacro) end
-        else
-            CurrentMacro = nil
-        end
-    end,
-})
-
-MacroNameInput = Tab:CreateInput({
-    Name = "MacroName",
-    CurrentValue = "",
-    PlaceholderText = "macro_name",
-    RemoveTextAfterFocusLost = false,
-    Flag = "MacroNameFlag",
-    Callback = function(Text) end,
-})
-
-local RecordButton = Tab:CreateButton({
-    Name = "Record / Stop",
-    Callback = function()
-        if not isRecording then
-            isRecording = true
-            currentRecording = {}
-            recordingStart = tick()
-            inputConn = {}
-            inputConn[1] = UserInputService.InputBegan:Connect(onInputBegan)
-            inputConn[2] = UserInputService.InputEnded:Connect(onInputEnded)
-            if RecordingGui then RecordingGui.Enabled = true end
-        else
-            isRecording = false
-            if inputConn then
-                for _, c in ipairs(inputConn) do
-                    if c and c.Disconnect then c:Disconnect() end
-                end
-                inputConn = nil
-            end
-            local name = MacroNameInput and MacroNameInput.CurrentValue or ""
-            if name == nil or name == "" then
-                name = "macro_" .. tostring(math.floor(tick()))
-            end
-            local ok = saveMacro(name, currentRecording)
-            if ok then
-                MacroDropdown:Refresh(MacroNames)
-                MacroDropdown:Set(name)
-                CurrentMacro = name
-            end
-            if RecordingGui then RecordingGui.Enabled = false end
-        end
-    end,
-})
-
-PlayToggle = Tab:CreateToggle({
-    Name = "Play Macro (repeats)",
-    CurrentValue = false,
-    Flag = "PlayMacroToggle",
-    Callback = function(Value)
-        if Value then
-            if CurrentMacro and Macros[CurrentMacro] then
-                playMacroByName(CurrentMacro, true)
-            else
-                PlayToggle:Set(false)
-            end
-        end
-    end,
-})
-
-local PlayOnceButton = Tab:CreateButton({
-    Name = "Play Once",
-    Callback = function()
-        if CurrentMacro and Macros[CurrentMacro] then
-            playMacroByName(CurrentMacro, false)
-        end
-    end,
-})
-
-local DeleteButton = Tab:CreateButton({
-    Name = "Delete Selected Macro",
-    Callback = function()
-        if CurrentMacro and Macros[CurrentMacro] then
-            deleteMacro(CurrentMacro)
-            CurrentMacro = nil
-            MacroDropdown:Refresh(MacroNames)
-            MacroNameInput:Set("")
-        end
-    end,
-})
-
-local RefreshButton = Tab:CreateButton({
-    Name = "Refresh Macros",
-    Callback = function()
-        refreshMacroDropdown()
-    end,
-})
-
--- ======= Expose macro API =======
-_G.RayfieldMacros = {
-    GetMacros = function() return Macros end,
-    Play = function(name) playMacroByName(name, false) end,
-    PlayLoop = function(name) playMacroByName(name, true) end,
-    Delete = function(name) deleteMacro(name) end,
-    Save = function(name, events) return saveMacro(name, events) end,
-    MacroEvent = MacroEvent
+local multipliers = {
+	K = 1e3,
+	M = 1e6,
+	B = 1e9,
+	T = 1e12
 }
 
-refreshMacroDropdown()
+local function NumberCoverter(text)
+	text = tostring(text):upper()
 
--- ======= MacroGuidHelper (scans for GUIDs and finds Spawn remote) =======
-local MacroGuidHelper = {}
-MacroGuidHelper._guidMap = {}
-MacroGuidHelper._equipped = {}
-MacroGuidHelper._spawnRemote = nil
-local uuidPattern = "%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x"
+	local value, suffix = text:match("([%d%.]+)%s*([KMBT]?)")
+	value = tonumber(value)
+	if not value then return nil end
 
-local function safeDescendants(root)
-    local ok, res = pcall(function() return root:GetDescendants() end)
-    if ok and type(res) == "table" then return res end
-    return {}
+	if suffix ~= "" and multipliers[suffix] then
+		return value * multipliers[suffix]
+	end
+
+	return value
 end
 
-local function scanRootForGuids(root)
-    for _, obj in ipairs(safeDescendants(root)) do
-        if obj:IsA("StringValue") and type(obj.Value) == "string" then
-            local s = obj.Value
-            for match in string.gmatch(s, uuidPattern) do
-                MacroGuidHelper._guidMap[match] = { path = obj:GetFullName(), source = obj }
-            end
-        end
-        if obj.GetAttributes then
-            local ok, attrs = pcall(function() return obj:GetAttributes() end)
-            if ok and type(attrs) == "table" then
-                for k,v in pairs(attrs) do
-                    if type(v) == "string" then
-                        for match in string.gmatch(v, uuidPattern) do
-                            MacroGuidHelper._guidMap[match] = { path = obj:GetFullName() .. " (Attribute:"..tostring(k)..")", source = obj }
-                        end
-                    end
-                end
-            end
-        end
-        if type(obj.Name) == "string" then
-            for match in string.gmatch(obj.Name, uuidPattern) do
-                MacroGuidHelper._guidMap[match] = { path = obj:GetFullName() .. " (Name)", source = obj }
-            end
-        end
-        if obj:IsA("ModuleScript") then
-            local ok, src = pcall(function() return obj.Source end)
-            if ok and type(src) == "string" then
-                for match in string.gmatch(src, uuidPattern) do
-                    MacroGuidHelper._guidMap[match] = { path = obj:GetFullName() .. " (ModuleScript source)", source = obj }
-                end
-            end
-        end
-    end
+local Frog = {}
+local FrogList = {}
+local ShopFrog = {}
+
+for i, v in pairs(plr.PlayerGui["Tadpole Trove_Shop"].MainContainer.Container.Frame.Body.Items:GetChildren()) do
+	if v:IsA("Frame") and v.Name:find(" Tadpole") then
+		table.insert(Frog, {v.Name, v.Name:gsub(" Tadpole", " Frog"), tonumber(NumberCoverter(v.Right.PriceSection.Button.Amount.Text))})
+	end
+end
+for i, v in pairs(Frog) do
+	table.insert(FrogList, v[1])
 end
 
-local function buildGuidMap()
-    MacroGuidHelper._guidMap = {}
-    local roots = {
-        ReplicatedStorage,
-        workspace,
-        workspace:FindFirstChild("Packages") or workspace,
-        LocalPlayer,
-        LocalPlayer:FindFirstChild("Backpack") or LocalPlayer,
-    }
-    for _, r in ipairs(roots) do
-        if r then pcall(scanRootForGuids, r) end
-    end
-    pcall(function()
-        local rep = ReplicatedStorage:FindFirstChild("Replicated")
-        if rep then scanRootForGuids(rep) end
-    end)
-    pcall(function()
-        local packages = ReplicatedStorage:FindFirstChild("Packages")
-        if packages then scanRootForGuids(packages) end
-    end)
-    return MacroGuidHelper._guidMap
+local Lilypad = {}
+local LilypadList = {}
+local ShopLilypad = {}
+
+for i, v in pairs(game:GetService("Players").LocalPlayer.PlayerGui["Lilypad Lounge_Shop"].MainContainer.Container.Frame.Body.Items:GetChildren()) do
+	if v:IsA("Frame") then
+		table.insert(Lilypad, {v.Name, tonumber(NumberCoverter(v.Right.PriceSection.Button.Amount.Text))})
+	end
+end
+for i, v in pairs(Lilypad) do
+	table.insert(LilypadList, v[1])
 end
 
-local function findEquippedTowers()
-    MacroGuidHelper._equipped = {}
-    local containers = {}
-    table.insert(containers, LocalPlayer:FindFirstChild("Backpack"))
-    table.insert(containers, LocalPlayer.Character)
-    table.insert(containers, workspace:FindFirstChild("Units"))
-    table.insert(containers, workspace:FindFirstChild(LocalPlayer.Name))
-    table.insert(containers, workspace:FindFirstChild("PlayerUnits"))
-    table.insert(containers, workspace)
+local Ribbit = {}
+local RibbitList = {}
+local ShopRibbit = {}
 
-    for _, container in ipairs(containers) do
-        if container then
-            for _, obj in ipairs(safeDescendants(container)) do
-                if obj.GetAttributes then
-                    local ok, attrs = pcall(function() return obj:GetAttributes() end)
-                    if ok and type(attrs) == "table" then
-                        for k,v in pairs(attrs) do
-                            if type(v) == "string" then
-                                for match in string.gmatch(v, uuidPattern) do
-                                    table.insert(MacroGuidHelper._equipped, { name = obj.Name or "Unnamed", guid = match, instance = obj, source = container:GetFullName() })
-                                end
-                            end
-                        end
-                    end
-                end
-                if obj:IsA("StringValue") and type(obj.Value) == "string" then
-                    for match in string.gmatch(obj.Value, uuidPattern) do
-                        table.insert(MacroGuidHelper._equipped, { name = obj.Name or "Unnamed", guid = match, instance = obj, source = container:GetFullName() })
-                    end
-                end
-                if obj:IsA("ModuleScript") then
-                    local ok, src = pcall(function() return obj.Source end)
-                    if ok and type(src) == "string" then
-                        for match in string.gmatch(src, uuidPattern) do
-                            table.insert(MacroGuidHelper._equipped, { name = obj.Name or "Module", guid = match, instance = obj, source = container:GetFullName() })
-                        end
-                    end
-                end
+for i, v in pairs(game:GetService("Players").LocalPlayer.PlayerGui["Ribbit Rack_Shop"].MainContainer.Container.Frame.Body.Items:GetChildren()) do
+	if v:IsA("Frame") then
+		table.insert(Ribbit, {v.Name, tonumber(NumberCoverter(v.Right.PriceSection.Button.Amount.Text))})
+	end
+end
+for i, v in pairs(Ribbit) do
+	table.insert(RibbitList, v[1])
+end
+
+local Main = Window:CreateTab("Main", 125058207637011)
+Main:CreateSection("Main")
+
+Main:CreateToggle({Name = "Anti Afk Bypass", CurrentValue = false, Flag = "Toggle1", Callback = function(Value)
+    local vu = game:GetService("VirtualUser")
+    if Value then
+    	RunAntiAfk = game:GetService("Players").LocalPlayer.Idled:connect(function()
+    		vu:Button2Down(Vector2.new(0,0),workspace.CurrentCamera.CFrame)
+    		wait(1)
+    		vu:Button2Up(Vector2.new(0,0),workspace.CurrentCamera.CFrame)
+    	end)
+    else
+        if RunAntiAfk then
+            RunAntiAfk:Disconnect()
+            RunAntiAfk = nil
+        end
+    end
+end})
+
+Main:CreateInput({Name = "Server", CurrentValue = "", PlaceholderText = "ServerId", RemoveTextAfterFocusLost = true, Callback = function(Value)
+    TeleportService:TeleportToPlaceInstance(game.PlaceId, Value, plr)
+end})
+
+Main:CreateButton({Name = "Rejoin", Callback = function()
+    TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, plr)
+end})
+
+Main:CreateButton({Name = "Server Hop", Callback = function()
+    local servers = {}
+    local req = game:HttpGet("https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Desc&limit=100&excludeFullGames=true")
+    local body = HttpService:JSONDecode(req)
+
+    if body and body.data then
+        for i, v in next, body.data do
+            if type(v) == "table" and tonumber(v.playing) and tonumber(v.maxPlayers) and v.playing < v.maxPlayers and v.id ~= JobId then
+                table.insert(servers, 1, v.id)
             end
         end
     end
 
-    local seen = {}
-    local dedup = {}
-    for _, e in ipairs(MacroGuidHelper._equipped) do
-        if not seen[e.guid] then
-            seen[e.guid] = true
-            table.insert(dedup, e)
-        end
+    if #servers > 0 then
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, servers[math.random(1, #servers)], plr)
     end
-    MacroGuidHelper._equipped = dedup
-    return MacroGuidHelper._equipped
-end
+end})
 
-local function findSpawnRemote()
-    local ok, rep = pcall(function() return ReplicatedStorage:FindFirstChild("Replicated") end)
-    local repRoot = rep or ReplicatedStorage
-    local function tryPath(root)
-        if not root then return nil end
-        local current = root
-        local names = {"Packages", "Knit", "Services", "AttackUnitService", "RF", "Spawn"}
-        for _, n in ipairs(names) do
-            current = current:FindFirstChild(n)
-            if not current then return nil end
-        end
-        return current
-    end
-    local remote = tryPath(repRoot)
-    if remote then
-        MacroGuidHelper._spawnRemote = remote
-        return remote
-    end
-    for _, obj in ipairs(safeDescendants(ReplicatedStorage)) do
-        if (obj:IsA("RemoteFunction") or obj:IsA("RemoteEvent")) and obj.Name:lower():find("spawn") then
-            MacroGuidHelper._spawnRemote = obj
-            return obj
-        end
-    end
-    return nil
-end
+local Farm = Window:CreateTab("Farm", 125058207637011)
+Farm:CreateSection("Farm")
 
-local function tryWrapSpawnInvoke()
-    local spawnRemote = MacroGuidHelper._spawnRemote
-    if not spawnRemote then return false end
-    if spawnRemote:IsA("RemoteFunction") then
-        if not MacroGuidHelper._invokeWrapper then
-            MacroGuidHelper._invokeWrapper = function(...)
-                local args = {...}
-                for i, a in ipairs(args) do
-                    if type(a) == "string" and string.match(a, uuidPattern) then
-                        MacroGuidHelper._guidMap[a] = MacroGuidHelper._guidMap[a] or { path = "Captured from Spawn InvokeServer", source = spawnRemote }
-                        print("[MacroGuidHelper] Captured GUID from Spawn args:", a)
-                    end
-                end
-                local ok, res = pcall(function() return spawnRemote:InvokeServer(unpack(args)) end)
-                if not ok then warn("[MacroGuidHelper] Spawn InvokeServer wrapper error:", res) end
-                return res
-            end
-            return true
-        end
-    elseif spawnRemote:IsA("RemoteEvent") then
-        if not MacroGuidHelper._eventConn then
-            local conn = spawnRemote.OnClientEvent:Connect(function(...)
-                local args = {...}
-                for i, a in ipairs(args) do
-                    if type(a) == "string" and string.match(a, uuidPattern) then
-                        MacroGuidHelper._guidMap[a] = MacroGuidHelper._guidMap[a] or { path = "Captured from Spawn OnClientEvent", source = spawnRemote }
-                        print("[MacroGuidHelper] Captured GUID from Spawn event:", a)
-                    end
-                end
+Farm:CreateToggle({Name = "Auto Sell All", CurrentValue = false, Flag = "Toggle1", Callback = function(Value)
+    AutoSell = Value
+end})
+
+Farm:CreateToggle({Name = "Auto Pick Up", CurrentValue = false, Flag = "Toggle1", Callback = function(Value)
+    AutoPickUp = Value
+end})
+
+Farm:CreateButton({Name = "Pick Up All", Callback = function()
+	for i, v in pairs(plr.Plot.Value.Entities:GetChildren()) do
+		if v:IsA("Part") then
+		    task.spawn(function()
+			    game:GetService("ReplicatedStorage"):WaitForChild("FrogPickupComms"):WaitForChild("RE"):WaitForChild("Pickup"):FireServer(v)
+			end)
+		end
+	end
+end})
+
+Farm:CreateButton({Name = "Sell All", Callback = function()
+    game:GetService("ReplicatedStorage"):WaitForChild("HopNSellComms"):WaitForChild("RE"):WaitForChild("SellAll"):FireServer()
+end})
+
+Farm:CreateButton({Name = "Place All Tadpole", Callback = function()
+    for i, v in pairs() do
+        if v:FindFirstChild("TadpoleToolComms") then
+            task.spawn(function()
+                local args = {
+                	plr.Plot.Value:WaitForChild("SwimableAreas"):WaitForChild("Pond1"):WaitForChild("PlaceArea"),
+                	vector.create(0, 0, 0)
+                }
+                v:WaitForChild("TadpoleToolComms"):WaitForChild("RE"):WaitForChild("RequestPlace"):FireServer(unpack(args))
             end)
-            MacroGuidHelper._eventConn = conn
-            return true
         end
     end
-    return false
-end
+end})
 
-local function placeTower(guid, cframe)
-    if type(guid) ~= "string" then return false, "guid must be string" end
-    if typeof(cframe) ~= "CFrame" then return false, "cframe must be CFrame" end
-    if not MacroGuidHelper._spawnRemote then findSpawnRemote() end
-    if not MacroGuidHelper._spawnRemote then return false, "Spawn remote not found" end
-    local args = { guid, cframe }
-    local ok, res = pcall(function()
-        if MacroGuidHelper._invokeWrapper then
-            return MacroGuidHelper._invokeWrapper(unpack(args))
-        else
-            return MacroGuidHelper._spawnRemote:InvokeServer(unpack(args))
-        end
-    end)
-    if not ok then return false, res end
-    return true, res
-end
+local Shop = Window:CreateTab("Shop", 125058207637011)
+Shop:CreateSection("Shop")
 
-MacroGuidHelper.GetGuidMap = function() return MacroGuidHelper._guidMap end
-MacroGuidHelper.RebuildGuidMap = function() return buildGuidMap() end
-MacroGuidHelper.FindEquipped = function() return findEquippedTowers() end
-MacroGuidHelper.FindSpawnRemote = function() return findSpawnRemote() end
-MacroGuidHelper.TryWrapSpawn = function() return tryWrapSpawnInvoke() end
-MacroGuidHelper.PlaceTower = function(guid, cframe) return placeTower(guid, cframe) end
+local Tadpoles = Shop:CreateDropdown({Name = "Tadpoles Trove", Options = FrogList, CurrentOption = {"None"}, MultipleOptions = true, Flag = "Dropdown1", Callback = function(Value)
+    ShopFrog = Value
+end})
 
-buildGuidMap()
-findEquippedTowers()
-findSpawnRemote()
-tryWrapSpawnInvoke()
+Shop:CreateButton({Name = "Select All", Callback = function()
+	Tadpoles:Set(FrogList)
+end})
 
-spawn(function()
-    while true do
-        task.wait(6)
-        buildGuidMap()
-        findEquippedTowers()
-        if not MacroGuidHelper._spawnRemote then
-            findSpawnRemote()
-            tryWrapSpawnInvoke()
-        end
-    end
+Shop:CreateToggle({Name = "Auto Buy", CurrentValue = false, Flag = "Toggle1", Callback = function(Value)
+    AutoBuy1 = Value
+end})
+
+local LilypadDrop = Shop:CreateDropdown({Name = "Lilypad Lounge", Options = LilypadList, CurrentOption = {"None"}, MultipleOptions = true, Flag = "Dropdown1", Callback = function(Value)
+    ShopLilypad = Value
+end})
+
+Shop:CreateButton({Name = "Select All", Callback = function()
+	LilypadDrop:Set(LilypadList)
+end})
+
+Shop:CreateToggle({Name = "Auto Buy", CurrentValue = false, Flag = "Toggle1", Callback = function(Value)
+    AutoBuy2 = Value
+end})
+
+local RibbitDrop = Shop:CreateDropdown({Name = "Ribbit Rack", Options = RibbitList, CurrentOption = {"None"}, MultipleOptions = true, Flag = "Dropdown1", Callback = function(Value)
+    ShopRibbit = Value
+end})
+
+Shop:CreateButton({Name = "Select All", Callback = function()
+	RibbitDrop:Set(RibbitList)
+end})
+
+Shop:CreateToggle({Name = "Auto Buy", CurrentValue = false, Flag = "Toggle1", Callback = function(Value)
+    AutoBuy3 = Value
+end})
+
+RunService.RenderStepped:Connect(function(deltaTime)
+	if AutoBuy1 then
+		for _, v in pairs(Frog) do
+			if ShopFrog and table.find(ShopFrog, v[1]) and NumberCoverter(plr.leaderstats.Ribbles.Value) >= v[3] then
+				game:GetService("ReplicatedStorage"):WaitForChild("TadpoleShopComms"):WaitForChild("RF"):WaitForChild("OnPurchaseItem"):InvokeServer(v[1], v[2])
+			end
+		end
+	end
+	if AutoBuy2 then
+		for _, v in pairs(Lilypad) do
+			if ShopLilypad and table.find(ShopLilypad, v[1]) and NumberCoverter(plr.leaderstats.Ribbles.Value) >= v[2] then
+				game:GetService("ReplicatedStorage"):WaitForChild("LilypadLoungeComms"):WaitForChild("RF"):WaitForChild("OnPurchaseItem"):InvokeServer(v[1])
+			end
+		end
+	end
+	if AutoBuy3 then
+		for _, v in pairs(Ribbit) do
+			if ShopRibbit and table.find(ShopRibbit, v[1]) and NumberCoverter(plr.leaderstats.Ribbles.Value) >= v[2] then
+				game:GetService("ReplicatedStorage"):WaitForChild("GearShopComms"):WaitForChild("RF"):WaitForChild("OnPurchaseItem"):InvokeServer(v[1])
+			end
+		end
+	end
+	if AutoPickUp then
+		for i, v in pairs(plr.Plot.Value.Entities:GetChildren()) do
+			if v:IsA("Part") then
+				game:GetService("ReplicatedStorage"):WaitForChild("FrogPickupComms"):WaitForChild("RE"):WaitForChild("Pickup"):FireServer(v)
+			end
+		end
+	end
+	if AutoSell then
+		game:GetService("ReplicatedStorage"):WaitForChild("HopNSellComms"):WaitForChild("RE"):WaitForChild("SellAll"):FireServer()
+	end
 end)
-
-_G.MacroGuidHelper = MacroGuidHelper
-
--- ======= TowerPlacementWatcher (watches workspace.Towers) =======
-local TowerPlacementWatcher = {}
-TowerPlacementWatcher.history = {}
-TowerPlacementWatcher.indexByUUID = {}
-TowerPlacementWatcher.indexByName = {}
-TowerPlacementWatcher.maxHistory = 200
-TowerPlacementWatcher.towersFolder = workspace:FindFirstChild("Towers")
-
-local function safeGet(obj, fn)
-    local ok, res = pcall(fn)
-    if ok then return res end
-    return nil
-end
-
-local function recordPlacement(instance)
-    if not instance or not instance.Parent then return end
-    local config = instance:FindFirstChild("Config")
-    if not config then return end
-
-    local towerNameVal = config:FindFirstChild("TowerName")
-    local unitUUIDVal = config:FindFirstChild("UnitUUID")
-
-    local towerName = nil
-    local unitUUID = nil
-
-    if towerNameVal and towerNameVal:IsA("StringValue") then
-        towerName = towerNameVal.Value
-    else
-        towerName = safeGet(config, function() return config:FindFirstChild("TowerName") and config:FindFirstChild("TowerName").Value end)
-    end
-
-    if unitUUIDVal and unitUUIDVal:IsA("StringValue") then
-        unitUUID = unitUUIDVal.Value
-    else
-        unitUUID = safeGet(config, function() return config:FindFirstChild("UnitUUID") and config:FindFirstChild("UnitUUID").Value end)
-    end
-
-    local basePart = instance:FindFirstChild("TowerBase")
-    local cframe = nil
-    if basePart and basePart:IsA("BasePart") then
-        cframe = basePart.CFrame
-    else
-        local primary = safeGet(instance, function() return instance.PrimaryPart end)
-        if primary and primary:IsA("BasePart") then
-            cframe = primary.CFrame
-        else
-            for _, d in ipairs(instance:GetDescendants()) do
-                if d:IsA("BasePart") then
-                    cframe = d.CFrame
-                    break
-                end
-            end
-        end
-    end
-
-    local rec = {
-        name = towerName or "Unknown",
-        uuid = unitUUID or "Unknown",
-        cframe = cframe,
-        instance = instance,
-        timestamp = tick()
-    }
-
-    table.insert(TowerPlacementWatcher.history, rec)
-    if #TowerPlacementWatcher.history > TowerPlacementWatcher.maxHistory then
-        table.remove(TowerPlacementWatcher.history, 1)
-    end
-
-    if rec.uuid and rec.uuid ~= "Unknown" then
-        TowerPlacementWatcher.indexByUUID[rec.uuid] = rec
-    end
-
-    if rec.name then
-        TowerPlacementWatcher.indexByName[rec.name] = TowerPlacementWatcher.indexByName[rec.name] or {}
-        table.insert(TowerPlacementWatcher.indexByName[rec.name], rec)
-        if #TowerPlacementWatcher.indexByName[rec.name] > 10 then
-            table.remove(TowerPlacementWatcher.indexByName[rec.name], 1)
-        end
-    end
-
-    if _G and _G.MacroGuidHelper and rec.uuid and rec.uuid ~= "Unknown" then
-        _G.MacroGuidHelper._guidMap = _G.MacroGuidHelper._guidMap or {}
-        if not _G.MacroGuidHelper._guidMap[rec.uuid] then
-            _G.MacroGuidHelper._guidMap[rec.uuid] = { path = instance:GetFullName() .. " (captured from workspace.Towers)", source = instance }
-        end
-    end
-
-    return rec
-end
-
-local function initialScan()
-    TowerPlacementWatcher.towersFolder = workspace:FindFirstChild("Towers")
-    if not TowerPlacementWatcher.towersFolder then return end
-    for _, child in ipairs(TowerPlacementWatcher.towersFolder:GetChildren()) do
-        if child:IsA("Model") or child:IsA("Folder") then
-            pcall(function() recordPlacement(child) end)
-        end
-    end
-end
-
-local childAddedConn = nil
-local function startWatching()
-    TowerPlacementWatcher.towersFolder = workspace:FindFirstChild("Towers")
-    if not TowerPlacementWatcher.towersFolder then
-        TowerPlacementWatcher.towersFolder = workspace:WaitForChild("Towers", 5)
-        if not TowerPlacementWatcher.towersFolder then return end
-    end
-
-    initialScan()
-
-    if childAddedConn then childAddedConn:Disconnect(); childAddedConn = nil end
-
-    childAddedConn = TowerPlacementWatcher.towersFolder.ChildAdded:Connect(function(child)
-        task.delay(0.05, function()
-            local ok, rec = pcall(function() return recordPlacement(child) end)
-            if ok and rec then
-                pcall(function()
-                    MacroEvent:Fire({
-                        EventType = "PlacementCaptured",
-                        name = rec.name,
-                        uuid = rec.uuid,
-                        cframe = rec.cframe,
-                        instance = rec.instance,
-                        timestamp = rec.timestamp
-                    })
-                end)
-            end
-        end)
-    end)
-end
-
-function TowerPlacementWatcher.GetLatest()
-    return TowerPlacementWatcher.history[#TowerPlacementWatcher.history]
-end
-
-function TowerPlacementWatcher.GetHistory(n)
-    n = n or TowerPlacementWatcher.maxHistory
-    local hist = TowerPlacementWatcher.history
-    if n >= #hist then return hist end
-    local out = {}
-    for i = math.max(1, #hist - n + 1), #hist do
-        table.insert(out, hist[i])
-    end
-    return out
-end
-
-function TowerPlacementWatcher.GetByUUID(uuid)
-    return TowerPlacementWatcher.indexByUUID[uuid]
-end
-
-function TowerPlacementWatcher.GetByName(name)
-    return TowerPlacementWatcher.indexByName[name] or {}
-end
-
-function TowerPlacementWatcher.WaitForNextPlacement(timeout)
-    local start = tick()
-    local lastCount = #TowerPlacementWatcher.history
-    while true do
-        if #TowerPlacementWatcher.history > lastCount then
-            return TowerPlacementWatcher.history[#TowerPlacementWatcher.history]
-        end
-        if timeout and tick() - start >= timeout then
-            return nil, "timeout"
-        end
-        task.wait(0.03)
-    end
-end
-
-function TowerPlacementWatcher.ResolveNameToUUID(name)
-    local byName = TowerPlacementWatcher.GetByName(name)
-    if byName and #byName > 0 then
-        return byName[#byName].uuid
-    end
-    if _G and _G.MacroGuidHelper then
-        for guid, info in pairs(_G.MacroGuidHelper._guidMap or {}) do
-            if info.path and tostring(info.path):lower():find(name:lower()) then
-                return guid
-            end
-        end
-    end
-    return nil
-end
-
-function TowerPlacementWatcher.GetCFrameForUUID(uuid)
-    local rec = TowerPlacementWatcher.GetByUUID(uuid)
-    if rec and rec.cframe then return rec.cframe end
-    return nil
-end
-
-startWatching()
-_G.TowerPlacementWatcher = TowerPlacementWatcher
-
--- ======= Convenience: auto-attach placement data to macro events (optional) =======
-MacroEvent.Event:Connect(function(data)
-    if data.EventType == "PlacementCaptured" then
-        if isRecording and currentRecording and #currentRecording > 0 then
-            local last = currentRecording[#currentRecording]
-            last.Placement = { name = data.name, uuid = data.uuid, cframe = data.cframe }
-        end
-    end
-end)
-
--- ======= Example playback listener (handles Placement payloads) =======
-MacroEvent.Event:Connect(function(ev)
-    if ev.EventType == "PlacementCaptured" then return end
-    if ev and ev.Placement then
-        local p = ev.Placement
-        if p.uuid and p.cframe then
-            local ok, res = MacroGuidHelper.PlaceTower(p.uuid, p.cframe)
-            if not ok and debugX then
-                warn("PlaceTower failed:", res)
-            end
-        end
-    end
-end)
-
--- ======= Finalize =======
-Rayfield:LoadConfiguration()
-
-if debugX then
-    print("[MacroSystem] Initialized without Rayfield boxes.")
-    print("[MacroSystem] Macros available:", #MacroNames)
-    print("[MacroSystem] MacroEvent located at:", MacroEvent and MacroEvent:GetFullName() or "nil")
-    if MacroGuidHelper._spawnRemote then
-        print("[MacroGuidHelper] Spawn remote found at:", MacroGuidHelper._spawnRemote:GetFullName())
-    else
-        print("[MacroGuidHelper] Spawn remote not found yet.")
-    end
-end
