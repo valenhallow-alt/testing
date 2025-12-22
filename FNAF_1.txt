@@ -8,7 +8,7 @@ if _G.RayfieldInstance then
     _G.RayfieldInstance = nil
 end
 
--- UnHub | by LE_GO89 (updated: removed "Pick Up All" button and suppress favorited frog alert)
+-- UnHub | by LE_GO89 (updated: Place All Tadpole is now a toggle; added Ignore Pickup dropdown)
 local Rayfield = loadstring(game:HttpGet('https://raw.githubusercontent.com/UnHub-LEGO/Scripts/refs/heads/main/Rayfield%20Library'))()
 _G.RayfieldInstance = Rayfield
 
@@ -51,6 +51,8 @@ local Players = game.Players
 -- Feature toggles / state
 local AutoBuyTadpoles, AutoPickUp, AutoBuyGears, RunAntiAfk = false, false, false, nil
 local BuyLoungeItems = false
+local PlaceAllTadpoles = false
+local IgnorePickupFor = {} -- table of selected names to ignore
 
 -- Anti-AFK: always enabled (no toggle in UI)
 do
@@ -170,32 +172,63 @@ Farm:CreateToggle({Name = "Auto Pick Up", CurrentValue = false, Flag = "Auto_Pic
     AutoPickUp = Value
 end})
 
--- "Pick Up All" button removed as requested
-
-Farm:CreateButton({Name = "Sell All", Callback = function()
-    game:GetService("ReplicatedStorage"):WaitForChild("HopNSellComms"):WaitForChild("RE"):WaitForChild("SellAll"):FireServer()
-end})
-
-Farm:CreateButton({Name = "Place All Tadpole", Callback = function()
-    local containers = {}
-    for _, item in pairs(plr.Backpack:GetChildren()) do table.insert(containers, item) end
-    if plr.Character then
-        for _, item in pairs(plr.Character:GetChildren()) do table.insert(containers, item) end
+-- New dropdown under Auto Pick Up: Ignore Pickup for (multiple selection)
+local IgnoreOptions = FrogList -- uses the Tadpole list gathered earlier; will be empty if GUI not loaded yet
+local IgnoreDropdown = Farm:CreateDropdown({
+    Name = "Ignore Pickup for",
+    Options = IgnoreOptions,
+    CurrentOption = {"None"},
+    MultipleOptions = true,
+    Flag = "Ignore_Pickup_For",
+    Callback = function(Value)
+        IgnorePickupFor = Value or {}
     end
+})
 
-    for _, v in pairs(containers) do
-        if v:FindFirstChild("TadpoleToolComms") then
+-- Place All Tadpole: changed from button to toggle
+Farm:CreateToggle({
+    Name = "Place All Tadpoles",
+    CurrentValue = false,
+    Flag = "Place_All_Tadpoles",
+    Callback = function(Value)
+        PlaceAllTadpoles = Value
+        if Value then
+            -- spawn a loop that places tadpoles periodically while enabled
             task.spawn(function()
-                pcall(function()
-                    local args = {
-                        plr.Plot.Value:WaitForChild("SwimableAreas"):WaitForChild("Pond1"):WaitForChild("PlaceArea"),
-                        vector.create(0, 0, 0)
-                    }
-                    v:WaitForChild("TadpoleToolComms"):WaitForChild("RE"):WaitForChild("RequestPlace"):FireServer(unpack(args))
-                end)
+                while PlaceAllTadpoles do
+                    -- gather tools from Backpack and Character
+                    local containers = {}
+                    if plr and plr.Backpack then
+                        for _, item in pairs(plr.Backpack:GetChildren()) do table.insert(containers, item) end
+                    end
+                    if plr and plr.Character then
+                        for _, item in pairs(plr.Character:GetChildren()) do table.insert(containers, item) end
+                    end
+
+                    for _, v in pairs(containers) do
+                        if not PlaceAllTadpoles then break end
+                        if v and v:FindFirstChild("TadpoleToolComms") then
+                            pcall(function()
+                                local args = {
+                                    plr.Plot.Value:WaitForChild("SwimableAreas"):WaitForChild("Pond1"):WaitForChild("PlaceArea"),
+                                    vector.create(0, 0, 0)
+                                }
+                                v:WaitForChild("TadpoleToolComms"):WaitForChild("RE"):WaitForChild("RequestPlace"):FireServer(unpack(args))
+                            end)
+                            task.wait(0.35) -- small delay to avoid spamming
+                        end
+                    end
+
+                    -- wait a bit before next pass
+                    task.wait(1)
+                end
             end)
         end
     end
+})
+
+Farm:CreateButton({Name = "Sell All", Callback = function()
+    game:GetService("ReplicatedStorage"):WaitForChild("HopNSellComms"):WaitForChild("RE"):WaitForChild("SellAll"):FireServer()
 end})
 
 -- SHOP tab (Lilypad dropdown removed; Tadpoles and Ribbit remain)
@@ -255,8 +288,6 @@ end})
 local Divider2 = Shop:CreateDivider()
 
 -- Move the lounge select/clear buttons into the Shop tab (new divided section)
--- These callbacks reference the lounge dropdown variables which are defined later;
--- when the buttons are pressed the lounge dropdowns will already exist.
 Shop:CreateButton({Name = "Select All Lounge Items", Callback = function()
     if ddObjects then
         ddObjects:Set(ObjectsOptions)
@@ -368,14 +399,30 @@ RunService.RenderStepped:Connect(function(deltaTime)
         end
     end
 
-    -- Auto pickup
+    -- Auto pickup (skip any entities matching IgnorePickupFor)
     if AutoPickUp then
-        for i, v in pairs(plr.Plot.Value.Entities:GetChildren()) do
-            if v:IsA("Part") then
-                -- attempt pickup but ignore errors (including favorited/locked frogs)
-                pcall(function()
-                    game:GetService("ReplicatedStorage"):WaitForChild("FrogPickupComms"):WaitForChild("RE"):WaitForChild("Pickup"):FireServer(v)
-                end)
+        for i, v in pairs((plr.Plot and plr.Plot.Value and plr.Plot.Value.Entities) and plr.Plot.Value.Entities:GetChildren() or {}) do
+            if v and v:IsA("Part") then
+                local okToPickup = true
+                -- determine a name to compare; prefer v.Name, fallback to Parent name if available
+                local entityName = tostring(v.Name or (v.Parent and v.Parent.Name) or "")
+                -- check ignore list (case-insensitive substring match)
+                for _, ignoreName in ipairs(IgnorePickupFor or {}) do
+                    if ignoreName and ignoreName ~= "None" and ignoreName ~= "" then
+                        local lowerEntity = string.lower(entityName)
+                        local lowerIgnore = string.lower(ignoreName)
+                        if lowerEntity:find(lowerIgnore, 1, true) or lowerIgnore:find(lowerEntity, 1, true) then
+                            okToPickup = false
+                            break
+                        end
+                    end
+                end
+                if okToPickup then
+                    -- attempt pickup but ignore errors (including favorited/locked frogs)
+                    pcall(function()
+                        game:GetService("ReplicatedStorage"):WaitForChild("FrogPickupComms"):WaitForChild("RE"):WaitForChild("Pickup"):FireServer(v)
+                    end)
+                end
             end
         end
     end
@@ -410,7 +457,6 @@ RunService.RenderStepped:Connect(function(deltaTime)
 end)
 
 -- Suppress the "Cannot pick up a favorited frog." alert by removing UI elements that contain that text.
--- This listens for new GUI descendants in CoreGui and PlayerGui and destroys any TextLabel/TextButton/TextBox that contains the message.
 do
     local TARGET_TEXT = "Cannot pick up a favorited frog"
     local function checkAndRemove(desc)
@@ -423,9 +469,7 @@ do
             pcall(function() text = tostring(desc.Text or "") end)
             if text:find(TARGET_TEXT) then
                 pcall(function()
-                    -- try to remove the nearest reasonable parent container to avoid leaving stray UI
                     local parent = desc.Parent
-                    -- climb up a few levels to remove the notification container if present
                     for i = 1, 4 do
                         if parent == nil then break end
                         if parent:IsA("ScreenGui") or parent:IsA("Frame") or parent:IsA("ImageLabel") then
@@ -434,21 +478,18 @@ do
                         end
                         parent = parent.Parent
                     end
-                    -- fallback: destroy the element itself
                     desc:Destroy()
                 end)
             end
         end
     end
 
-    -- scan existing CoreGui descendants
     pcall(function()
         for _, d in pairs(game:GetService("CoreGui"):GetDescendants()) do
             checkAndRemove(d)
         end
     end)
 
-    -- scan existing PlayerGui descendants
     pcall(function()
         if plr and plr:FindFirstChild("PlayerGui") then
             for _, d in pairs(plr.PlayerGui:GetDescendants()) do
@@ -457,17 +498,14 @@ do
         end
     end)
 
-    -- connect to future additions in CoreGui
     pcall(function()
         game:GetService("CoreGui").DescendantAdded:Connect(function(desc)
-            -- small delay to allow text to be set by the game
             task.defer(function()
                 checkAndRemove(desc)
             end)
         end)
     end)
 
-    -- connect to future additions in PlayerGui
     pcall(function()
         if plr and plr:FindFirstChild("PlayerGui") then
             plr.PlayerGui.DescendantAdded:Connect(function(desc)
