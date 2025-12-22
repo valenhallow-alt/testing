@@ -8,7 +8,7 @@ if _G.RayfieldInstance then
     _G.RayfieldInstance = nil
 end
 
--- UnHub | by LE_GO89 (updated: Ignore Pickup dropdown display order matches Tadpoles Trove)
+-- UnHub | by LE_GO89 (consolidated final script)
 local Rayfield = loadstring(game:HttpGet('https://raw.githubusercontent.com/UnHub-LEGO/Scripts/refs/heads/main/Rayfield%20Library'))()
 _G.RayfieldInstance = Rayfield
 
@@ -82,7 +82,25 @@ local function NumberCoverter(text)
     return value
 end
 
--- Build Tadpole (Frog) shop data from GUI
+-- Tadpole shop display order (user-specified)
+local TadpoleOptions = {
+    "Pond Tadpole","Wood Tadpole","Dewback Tadpole","Bullfrog Tadpole","Dart Tadpole",
+    "Mossback Tadpole","Frogberry Tadpole","Budtop Tadpole","Mushtoad Tadpole","Sugar Tadpole",
+    "Glacier Tadpole","Molten Tadpole","Chronogear Tadpole","Voltcloud Tadpole","Crystalback Tadpole",
+    "Shadow Hopper Tadpole","Astro Tadpole","Candelune Tadpole","Frogzilla Tadpole","Cheeseburger Tadpole",
+    "Runesage Tadpole","Arcana Tadpole","Moltrix Tadpole","Bunblossom Tadpole","Jester Tadpole","Archangel Tadpole"
+}
+
+-- Exact frog/toad display names for ignore list (user-specified, exact order/spelling)
+local FrogNames = {
+    "Pond Frog","Wood Frog","Dewback Frog","Bullfrog","Dart Frog","Mossback Frog","Frogberry",
+    "Budtop Frog","Mushtoad","Sugar Frog","Glacier Frog","Molten Toad","Chronogear Toad",
+    "Voltcloud Toad","Crystalback Toad","Shadow Hopper","Astro Frog","Candelune Toad",
+    "Frogzilla","Cheeseburger Frog","Runesage Frog","Arcana Toad","Moltrix Toad",
+    "Bunblossom Frog","Jester Frog","Archangel Frog"
+}
+
+-- Build Tadpole (Frog) shop data from GUI (if available)
 local Frog = {}
 local FrogList = {}
 local ShopFrog = {}
@@ -113,7 +131,7 @@ if plr and plr.PlayerGui and plr.PlayerGui:FindFirstChild("Lilypad Lounge_Shop")
     end
 end
 
--- Ribbit (Gears) shop data
+-- Ribbit (Gears) shop data (fallback to static order later)
 local Ribbit = {}
 local RibbitList = {}
 local ShopRibbit = {}
@@ -172,10 +190,10 @@ Farm:CreateToggle({Name = "Auto Pick Up", CurrentValue = false, Flag = "Auto_Pic
     AutoPickUp = Value
 end})
 
--- Ignore Pickup dropdown will be created here with empty options and refreshed later to match Tadpole order
+-- Ignore Pickup dropdown: display order matches Tadpoles Trove (use FrogNames as requested)
 local IgnoreDropdown = Farm:CreateDropdown({
     Name = "Ignore Pickup for",
-    Options = {}, -- will be refreshed to Tadpole order after TadpoleOptions is defined
+    Options = FrogNames,
     CurrentOption = {"None"},
     MultipleOptions = true,
     Flag = "Ignore_Pickup_For",
@@ -231,15 +249,7 @@ end})
 local Shop = Window:CreateTab("Shop", 125058207637011)
 Shop:CreateSection("Shop")
 
--- Tadpole dropdown: explicit display order requested
-local TadpoleOptions = {
-    "Pond Tadpole","Wood Tadpole","Dewback Tadpole","Bullfrog Tadpole","Dart Tadpole",
-    "Mossback Tadpole","Frogberry Tadpole","Budtop Tadpole","Mushtoad Tadpole","Sugar Tadpole",
-    "Glacier Tadpole","Molten Tadpole","Chronogear Tadpole","Voltcloud Tadpole","Crystalback Tadpole",
-    "Shadow Hopper Tadpole","Astro Tadpole","Candelune Tadpole","Frogzilla Tadpole","Cheeseburger Tadpole",
-    "Runesage Tadpole","Arcana Tadpole","Moltrix Tadpole","Bunblossom Tadpole","Jester Tadpole","Archangel Tadpole"
-}
-
+-- Tadpoles Trove dropdown (display order as requested)
 local Tadpoles = Shop:CreateDropdown({
     Name = "Tadpoles Trove",
     Options = TadpoleOptions,
@@ -256,7 +266,7 @@ Shop:CreateButton({Name = "Select All Tadpoles", Callback = function()
 end})
 
 -- Divider between Tadpole Trove and Ribbit Rack
-local Divider = Shop:CreateDivider()
+Shop:CreateDivider()
 
 -- Ribbit Rack dropdown: display order set as requested
 local RibbitOptions = {
@@ -281,7 +291,7 @@ Shop:CreateButton({Name = "Select All Gears", Callback = function()
 end})
 
 -- NEW divider for the lounge buttons section
-local Divider2 = Shop:CreateDivider()
+Shop:CreateDivider()
 
 -- Move the lounge select/clear buttons into the Shop tab (new divided section)
 Shop:CreateButton({Name = "Select All Lounge Items", Callback = function()
@@ -371,16 +381,6 @@ local ddBuild  = Lounge:CreateDropdown({Name = "Buildings", Options = BuildingsO
 local ddArch   = Lounge:CreateDropdown({Name = "Arches",    Options = ArchesOptions,    CurrentOption = {"None"}, MultipleOptions = true, Flag = "Lounge_Arches",    Callback = function(Value) LoungeArches    = Value end})
 local ddLight  = Lounge:CreateDropdown({Name = "Lighting",  Options = LightingOptions,  CurrentOption = {"None"}, MultipleOptions = true, Flag = "Lounge_Lighting",  Callback = function(Value) LoungeLighting  = Value end})
 
--- After TadpoleOptions is defined and Tadpoles dropdown created, refresh the IgnoreDropdown options
-pcall(function()
-    if IgnoreDropdown and type(IgnoreDropdown.Refresh) == "function" then
-        IgnoreDropdown:Refresh(TadpoleOptions)
-    elseif IgnoreDropdown and type(IgnoreDropdown.Set) == "function" then
-        -- some Rayfield versions use Set to change selection; keep Refresh preferred
-        IgnoreDropdown:Refresh(TadpoleOptions)
-    end
-end)
-
 -- Render loop: handle auto-buy logic for Tadpoles, Gears (Ribbit), Pickup, Sell, and Buy Lounge Items
 RunService.RenderStepped:Connect(function(deltaTime)
     -- Tadpoles auto-buy (AutoBuyTadpoles controlled by Main toggle "Auto Buy Tadpoles")
@@ -405,22 +405,34 @@ RunService.RenderStepped:Connect(function(deltaTime)
         end
     end
 
-    -- Auto pickup (skip any entities matching IgnorePickupFor)
+    -- Auto pickup (skip any entities matching IgnorePickupFor using exact case-insensitive match)
     if AutoPickUp then
         for i, v in pairs((plr.Plot and plr.Plot.Value and plr.Plot.Value.Entities) and plr.Plot.Value.Entities:GetChildren() or {}) do
             if v and v:IsA("Part") then
                 local okToPickup = true
-                local entityName = tostring(v.Name or (v.Parent and v.Parent.Name) or "")
+                local entityName = ""
+                -- try to read a display name if present, otherwise fallback to v.Name or parent name
+                pcall(function()
+                    if v:FindFirstChild("DisplayName") and v.DisplayName:IsA("StringValue") then
+                        entityName = tostring(v.DisplayName.Value)
+                    elseif v:FindFirstChild("NameTag") and v.NameTag:IsA("StringValue") then
+                        entityName = tostring(v.NameTag.Value)
+                    else
+                        entityName = tostring(v.Name or (v.Parent and v.Parent.Name) or "")
+                    end
+                end)
+
+                local lowerEntity = string.lower(entityName or "")
+
                 for _, ignoreName in ipairs(IgnorePickupFor or {}) do
                     if ignoreName and ignoreName ~= "None" and ignoreName ~= "" then
-                        local lowerEntity = string.lower(entityName)
-                        local lowerIgnore = string.lower(ignoreName)
-                        if lowerEntity:find(lowerIgnore, 1, true) or lowerIgnore:find(lowerEntity, 1, true) then
+                        if string.lower(ignoreName) == lowerEntity then
                             okToPickup = false
                             break
                         end
                     end
                 end
+
                 if okToPickup then
                     pcall(function()
                         game:GetService("ReplicatedStorage"):WaitForChild("FrogPickupComms"):WaitForChild("RE"):WaitForChild("Pickup"):FireServer(v)
