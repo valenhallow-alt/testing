@@ -8,7 +8,7 @@ if _G.RayfieldInstance then
     _G.RayfieldInstance = nil
 end
 
--- UnHub | by LE_GO89 (updated: Place All Tadpole is now a toggle; added Ignore Pickup dropdown)
+-- UnHub | by LE_GO89 (updated: Ignore Pickup dropdown display order matches Tadpoles Trove)
 local Rayfield = loadstring(game:HttpGet('https://raw.githubusercontent.com/UnHub-LEGO/Scripts/refs/heads/main/Rayfield%20Library'))()
 _G.RayfieldInstance = Rayfield
 
@@ -172,11 +172,10 @@ Farm:CreateToggle({Name = "Auto Pick Up", CurrentValue = false, Flag = "Auto_Pic
     AutoPickUp = Value
 end})
 
--- New dropdown under Auto Pick Up: Ignore Pickup for (multiple selection)
-local IgnoreOptions = FrogList -- uses the Tadpole list gathered earlier; will be empty if GUI not loaded yet
+-- Ignore Pickup dropdown will be created here with empty options and refreshed later to match Tadpole order
 local IgnoreDropdown = Farm:CreateDropdown({
     Name = "Ignore Pickup for",
-    Options = IgnoreOptions,
+    Options = {}, -- will be refreshed to Tadpole order after TadpoleOptions is defined
     CurrentOption = {"None"},
     MultipleOptions = true,
     Flag = "Ignore_Pickup_For",
@@ -185,7 +184,7 @@ local IgnoreDropdown = Farm:CreateDropdown({
     end
 })
 
--- Place All Tadpole: changed from button to toggle
+-- Place All Tadpoles: changed from button to toggle
 Farm:CreateToggle({
     Name = "Place All Tadpoles",
     CurrentValue = false,
@@ -193,10 +192,8 @@ Farm:CreateToggle({
     Callback = function(Value)
         PlaceAllTadpoles = Value
         if Value then
-            -- spawn a loop that places tadpoles periodically while enabled
             task.spawn(function()
                 while PlaceAllTadpoles do
-                    -- gather tools from Backpack and Character
                     local containers = {}
                     if plr and plr.Backpack then
                         for _, item in pairs(plr.Backpack:GetChildren()) do table.insert(containers, item) end
@@ -215,11 +212,10 @@ Farm:CreateToggle({
                                 }
                                 v:WaitForChild("TadpoleToolComms"):WaitForChild("RE"):WaitForChild("RequestPlace"):FireServer(unpack(args))
                             end)
-                            task.wait(0.35) -- small delay to avoid spamming
+                            task.wait(0.35)
                         end
                     end
 
-                    -- wait a bit before next pass
                     task.wait(1)
                 end
             end)
@@ -375,6 +371,16 @@ local ddBuild  = Lounge:CreateDropdown({Name = "Buildings", Options = BuildingsO
 local ddArch   = Lounge:CreateDropdown({Name = "Arches",    Options = ArchesOptions,    CurrentOption = {"None"}, MultipleOptions = true, Flag = "Lounge_Arches",    Callback = function(Value) LoungeArches    = Value end})
 local ddLight  = Lounge:CreateDropdown({Name = "Lighting",  Options = LightingOptions,  CurrentOption = {"None"}, MultipleOptions = true, Flag = "Lounge_Lighting",  Callback = function(Value) LoungeLighting  = Value end})
 
+-- After TadpoleOptions is defined and Tadpoles dropdown created, refresh the IgnoreDropdown options
+pcall(function()
+    if IgnoreDropdown and type(IgnoreDropdown.Refresh) == "function" then
+        IgnoreDropdown:Refresh(TadpoleOptions)
+    elseif IgnoreDropdown and type(IgnoreDropdown.Set) == "function" then
+        -- some Rayfield versions use Set to change selection; keep Refresh preferred
+        IgnoreDropdown:Refresh(TadpoleOptions)
+    end
+end)
+
 -- Render loop: handle auto-buy logic for Tadpoles, Gears (Ribbit), Pickup, Sell, and Buy Lounge Items
 RunService.RenderStepped:Connect(function(deltaTime)
     -- Tadpoles auto-buy (AutoBuyTadpoles controlled by Main toggle "Auto Buy Tadpoles")
@@ -404,9 +410,7 @@ RunService.RenderStepped:Connect(function(deltaTime)
         for i, v in pairs((plr.Plot and plr.Plot.Value and plr.Plot.Value.Entities) and plr.Plot.Value.Entities:GetChildren() or {}) do
             if v and v:IsA("Part") then
                 local okToPickup = true
-                -- determine a name to compare; prefer v.Name, fallback to Parent name if available
                 local entityName = tostring(v.Name or (v.Parent and v.Parent.Name) or "")
-                -- check ignore list (case-insensitive substring match)
                 for _, ignoreName in ipairs(IgnorePickupFor or {}) do
                     if ignoreName and ignoreName ~= "None" and ignoreName ~= "" then
                         local lowerEntity = string.lower(entityName)
@@ -418,7 +422,6 @@ RunService.RenderStepped:Connect(function(deltaTime)
                     end
                 end
                 if okToPickup then
-                    -- attempt pickup but ignore errors (including favorited/locked frogs)
                     pcall(function()
                         game:GetService("ReplicatedStorage"):WaitForChild("FrogPickupComms"):WaitForChild("RE"):WaitForChild("Pickup"):FireServer(v)
                     end)
