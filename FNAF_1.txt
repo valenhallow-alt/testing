@@ -1,4 +1,4 @@
--- UnHub | by LE_GO89 (updated: Tadpole order + Auto Buy Tadpoles moved to Main)
+-- UnHub | by LE_GO89 (updated: Ribbit order + Auto Buy Ribbit moved to Main)
 local Rayfield = loadstring(game:HttpGet('https://raw.githubusercontent.com/UnHub-LEGO/Scripts/refs/heads/main/Rayfield%20Library'))()
 
 local Window = Rayfield:CreateWindow({
@@ -101,7 +101,7 @@ if plr and plr.PlayerGui and plr.PlayerGui:FindFirstChild("Lilypad Lounge_Shop")
     end
 end
 
--- Ribbit shop
+-- Ribbit shop (GUI data)
 local Ribbit = {}
 local RibbitList = {}
 local ShopRibbit = {}
@@ -117,7 +117,7 @@ if plr and plr.PlayerGui and plr.PlayerGui:FindFirstChild("Ribbit Rack_Shop") th
     end
 end
 
--- MAIN tab: Buy Lounge Items + Auto Buy Tadpoles (Anti-AFK remains enabled)
+-- MAIN tab: Buy Lounge Items + Auto Buy Tadpoles + Auto Buy Ribbit (Anti-AFK remains enabled)
 local Main = Window:CreateTab("Main", 125058207637011)
 Main:CreateSection("Main")
 
@@ -137,6 +137,16 @@ Main:CreateToggle({
     Flag = "Auto_Buy_Tadpoles",
     Callback = function(Value)
         AutoBuy1 = Value
+    end,
+})
+
+-- Auto Buy Ribbit moved to Main
+Main:CreateToggle({
+    Name = "Auto Buy Ribbit",
+    CurrentValue = false,
+    Flag = "Auto_Buy_Ribbit",
+    Callback = function(Value)
+        AutoBuy3 = Value
     end,
 })
 
@@ -197,7 +207,7 @@ end})
 local Shop = Window:CreateTab("Shop", 125058207637011)
 Shop:CreateSection("Shop")
 
--- Tadpole dropdown: use explicit display order requested by user
+-- Tadpole dropdown: explicit display order
 local TadpoleOptions = {
     "Pond Tadpole","Wood Tadpole","Dewback Tadpole","Bullfrog Tadpole","Dart Tadpole",
     "Mossback Tadpole","Frogberry Tadpole","Budtop Tadpole","Mushtoad Tadpole","Sugar Tadpole",
@@ -221,18 +231,25 @@ Shop:CreateButton({Name = "Select All Tadpoles", Callback = function()
     Tadpoles:Set(TadpoleOptions)
 end})
 
--- Note: Auto Buy Tadpoles toggle was moved to Main (AutoBuy1 variable)
+-- Ribbit Rack dropdown: display order set as requested
+local RibbitOptions = {
+    "Frog Labeler","Dripleaf Pad","Emberleaf Pad","Azureleaf Pad","Bug Spray",
+    "Swamp Soother","Pondlight Orb","Frogtag Charm","Runechime Pillar","Pondmother's Phial","Asterveil Catalyst"
+}
 
-local RibbitDrop = Shop:CreateDropdown({Name = "Ribbit Rack", Options = RibbitList, CurrentOption = {"None"}, MultipleOptions = true, Flag = "Dropdown3", Callback = function(Value)
-    ShopRibbit = Value
-end})
+local RibbitDrop = Shop:CreateDropdown({
+    Name = "Ribbit Rack",
+    Options = RibbitOptions,
+    CurrentOption = {"None"},
+    MultipleOptions = true,
+    Flag = "Dropdown_Ribbit",
+    Callback = function(Value)
+        ShopRibbit = Value
+    end
+})
 
 Shop:CreateButton({Name = "Select All Ribbit", Callback = function()
-    RibbitDrop:Set(RibbitList)
-end})
-
-Shop:CreateToggle({Name = "Auto Buy Ribbit", CurrentValue = false, Flag = "Toggle3", Callback = function(Value)
-    AutoBuy3 = Value
+    RibbitDrop:Set(RibbitOptions)
 end})
 
 -- LOUNGE tab and dropdowns (Lilypad items sorted into categories)
@@ -320,7 +337,7 @@ RunService.RenderStepped:Connect(function(deltaTime)
         end
     end
 
-    -- Ribbit auto-buy (unchanged)
+    -- Ribbit auto-buy (AutoBuy3 controlled by Main toggle "Auto Buy Ribbit")
     if AutoBuy3 then
         for _, v in pairs(Ribbit) do
             if ShopRibbit and table.find(ShopRibbit, v[1]) and NumberCoverter(plr.leaderstats.Ribbles.Value) >= v[2] then
