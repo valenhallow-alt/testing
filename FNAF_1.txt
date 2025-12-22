@@ -1,4 +1,4 @@
--- UnHub | by LE_GO89 (with Lounge tab added)
+-- UnHub | by LE_GO89 (with Lounge tab populated and Lilypad dropdown removed)
 local Rayfield = loadstring(game:HttpGet('https://raw.githubusercontent.com/UnHub-LEGO/Scripts/refs/heads/main/Rayfield%20Library'))()
 
 local Window = Rayfield:CreateWindow({
@@ -36,7 +36,7 @@ local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 local plr = game.Players.LocalPlayer
 local Players = game.Players
-local AutoBuy1, AutoPickUp, AutoBuy2, AutoBuy3, RunAntiAfk = false, false, false, false, nil
+local AutoBuy1, AutoPickUp, AutoBuy3, RunAntiAfk = false, false, false, nil
 
 local multipliers = {
     K = 1e3,
@@ -74,7 +74,6 @@ end
 
 local Lilypad = {}
 local LilypadList = {}
-local ShopLilypad = {}
 
 for i, v in pairs(game:GetService("Players").LocalPlayer.PlayerGui["Lilypad Lounge_Shop"].MainContainer.Container.Frame.Body.Items:GetChildren()) do
     if v:IsA("Frame") then
@@ -210,43 +209,64 @@ Shop:CreateToggle({Name = "Auto Buy", CurrentValue = false, Flag = "Toggle1", Ca
     AutoBuy1 = Value
 end})
 
-local LilypadDrop = Shop:CreateDropdown({Name = "Lilypad Lounge", Options = LilypadList, CurrentOption = {"None"}, MultipleOptions = true, Flag = "Dropdown1", Callback = function(Value)
-    ShopLilypad = Value
-end})
-
-Shop:CreateButton({Name = "Select All", Callback = function()
-    LilypadDrop:Set(LilypadList)
-end})
-
-Shop:CreateToggle({Name = "Auto Buy", CurrentValue = false, Flag = "Toggle1", Callback = function(Value)
-    AutoBuy2 = Value
-end})
-
-local RibbitDrop = Shop:CreateDropdown({Name = "Ribbit Rack", Options = RibbitList, CurrentOption = {"None"}, MultipleOptions = true, Flag = "Dropdown1", Callback = function(Value)
+local RibbitDrop = Shop:CreateDropdown({Name = "Ribbit Rack", Options = RibbitList, CurrentOption = {"None"}, MultipleOptions = true, Flag = "Dropdown3", Callback = function(Value)
     ShopRibbit = Value
 end})
 
-Shop:CreateButton({Name = "Select All", Callback = function()
+Shop:CreateButton({Name = "Select All Ribbit", Callback = function()
     RibbitDrop:Set(RibbitList)
 end})
 
-Shop:CreateToggle({Name = "Auto Buy", CurrentValue = false, Flag = "Toggle1", Callback = function(Value)
+Shop:CreateToggle({Name = "Auto Buy Ribbit", CurrentValue = false, Flag = "Toggle3", Callback = function(Value)
     AutoBuy3 = Value
 end})
 
--- Lounge tab and dropdowns (added)
+-- Lounge tab and dropdowns (Lilypad items sorted into categories)
 local Lounge = Window:CreateTab("Lounge", 125058207637011)
 Lounge:CreateSection("Lounge")
 
--- Placeholder option lists — replace with actual in-game names
-local ObjectsOptions   = {"Bench","Fountain","Statue"}
-local PathwaysOptions  = {"Gravel Path","Stone Path","Wooden Plank"}
-local FencesOptions    = {"Wood Fence","Stone Fence","Bamboo Fence"}
-local PlantsOptions    = {"Fern","Lotus","Reed"}
-local RocksOptions     = {"Small Rock","Medium Rock","Large Boulder"}
-local BuildingsOptions = {"Shed","Gazebo","BridgeHouse"}
-local ArchesOptions    = {"Stone Arch","Wood Arch"}
-local LightingOptions  = {"Lantern","Torch","Glowstone"}
+local ObjectsOptions = {
+    "Barrel","Frogbreeze Chime","Fruit Crate","Ladder","Log","Log Sapling","Log Stack","Short Log",
+    "Tree Trunk","Wooden Wheelbarrow","Shelf","Small Haystack","Large Haystack","Book Stack",
+    "Wooden Bench","Book","Mossy Frog Hut","Mossmuffin Abode","Mushroom Cottage","Small Duck",
+    "Duck","Acornwhisk Hut","Well","Watch Tower"
+}
+
+local PathwaysOptions = {
+    "Cobble Path","Mossrock Path","Plank Steps","Rockleaf Path","Softwood Path","Stone Path",
+    "Wornwood Path","Log Steps","Log Path","Brick Steps","Mosscobble Path","Pebblestone Path","Blossom Path"
+}
+
+local FencesOptions = {
+    "Twigweave Fence","Wooden Fence","Mossrail Fence","Sproutstick Fence","Bloomtwig Fence"
+}
+
+local PlantsOptions = {
+    "Giant Lilypad","Lilypad","Mushroom","Mushroom Cluster","Short Cattails","Starpetal Ferns",
+    "Cattails","Dewdrop Lilies","Faelight Petals","Lilypad Umbrella","Bellblossoms","Lotus"
+}
+
+local RocksOptions = {
+    "Rock cluster","Rocks","Small Rocks","Grass Mound","Mossy Rocks"
+}
+
+local BuildingsOptions = {
+    "Plank Wall [1x1]","Plank Wall [3x1]","Plank Wall Plank Wall [3x2]","Wooden Pillar",
+    "Wooden Wall [1x1]","Wooden Wall [3x1]","Wooden Wall [3x2]","Wooden Window",
+    "Willowplank Wall [1x1]","Willowplank Wall [3x1]","Willowplank Wall [3x2]","Charwood Pillar",
+    "Charwood Wall [3x1]","Charwood Wall [1x1]","Logstack Wall [1x1]","Logstack Wall [3x1]",
+    "Logstack Wall [3x2]","Splitstone Wall [3x1]","Splitstone Wall [3x1]","Splitstone Wall [1x1]"
+}
+
+local ArchesOptions = {
+    "Mossy Rock Arch","Rocky Arch","Wooden Arbor","Flower Ivy Arch","Rustic Wood Arbor",
+    "Mushroom Arch","Willowvine Arch"
+}
+
+local LightingOptions = {
+    "Mossy Latern","Latern","Stone Latern","Wooden Lamp Post","Candle","Candle Cluster",
+    "Domeglow Lantern","Whisperlight Lantern","Firefly Lantern","Glowcap Lamp Post"
+}
 
 -- Variables to hold current selections
 local LoungeObjects, LoungePathways, LoungeFences, LoungePlants, LoungeRocks, LoungeBuildings, LoungeArches, LoungeLighting =
@@ -278,13 +298,6 @@ RunService.RenderStepped:Connect(function(deltaTime)
         for _, v in pairs(Frog) do
             if ShopFrog and table.find(ShopFrog, v[1]) and NumberCoverter(plr.leaderstats.Ribbles.Value) >= v[3] then
                 game:GetService("ReplicatedStorage"):WaitForChild("TadpoleShopComms"):WaitForChild("RF"):WaitForChild("OnPurchaseItem"):InvokeServer(v[1], v[2])
-            end
-        end
-    end
-    if AutoBuy2 then
-        for _, v in pairs(Lilypad) do
-            if ShopLilypad and table.find(ShopLilypad, v[1]) and NumberCoverter(plr.leaderstats.Ribbles.Value) >= v[2] then
-                game:GetService("ReplicatedStorage"):WaitForChild("LilypadLoungeComms"):WaitForChild("RF"):WaitForChild("OnPurchaseItem"):InvokeServer(v[1])
             end
         end
     end
