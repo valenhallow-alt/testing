@@ -1,4 +1,4 @@
--- UnHub | by LE_GO89 (updated: Ribbit order + Auto Buy Ribbit moved to Main)
+-- UnHub | by LE_GO89 (updated: divider, Ribbit rename, theme DarkBlue)
 local Rayfield = loadstring(game:HttpGet('https://raw.githubusercontent.com/UnHub-LEGO/Scripts/refs/heads/main/Rayfield%20Library'))()
 
 local Window = Rayfield:CreateWindow({
@@ -7,7 +7,7 @@ local Window = Rayfield:CreateWindow({
    Icon = 0,
    LoadingTitle = "UnHub",
    LoadingSubtitle = "by LE_GO89",
-   Theme = "Default",
+   Theme = "DarkBlue",
    ToggleUIKeybind = "H",
    ConfigurationSaving = {
       Enabled = true,
@@ -117,7 +117,7 @@ if plr and plr.PlayerGui and plr.PlayerGui:FindFirstChild("Ribbit Rack_Shop") th
     end
 end
 
--- MAIN tab: Buy Lounge Items + Auto Buy Tadpoles + Auto Buy Ribbit (Anti-AFK remains enabled)
+-- MAIN tab: Buy Lounge Items + Auto Buy Tadpoles + Auto Buy Gears (Anti-AFK remains enabled)
 local Main = Window:CreateTab("Main", 125058207637011)
 Main:CreateSection("Main")
 
@@ -140,11 +140,11 @@ Main:CreateToggle({
     end,
 })
 
--- Auto Buy Ribbit moved to Main
+-- Auto Buy Ribbit moved to Main and renamed to Auto Buy Gears
 Main:CreateToggle({
-    Name = "Auto Buy Ribbit",
+    Name = "Auto Buy Gears",
     CurrentValue = false,
-    Flag = "Auto_Buy_Ribbit",
+    Flag = "Auto_Buy_Gears",
     Callback = function(Value)
         AutoBuy3 = Value
     end,
@@ -231,6 +231,9 @@ Shop:CreateButton({Name = "Select All Tadpoles", Callback = function()
     Tadpoles:Set(TadpoleOptions)
 end})
 
+-- Divider between Tadpole Trove and Ribbit Rack
+local Divider = Shop:CreateDivider()
+
 -- Ribbit Rack dropdown: display order set as requested
 local RibbitOptions = {
     "Frog Labeler","Dripleaf Pad","Emberleaf Pad","Azureleaf Pad","Bug Spray",
@@ -248,7 +251,8 @@ local RibbitDrop = Shop:CreateDropdown({
     end
 })
 
-Shop:CreateButton({Name = "Select All Ribbit", Callback = function()
+-- Rename Select All Ribbit to "Select All Gears"
+Shop:CreateButton({Name = "Select All Gears", Callback = function()
     RibbitDrop:Set(RibbitOptions)
 end})
 
@@ -324,7 +328,7 @@ Lounge:CreateButton({Name = "Clear All Selections", Callback = function()
     ddObjects:Set({}); ddPath:Set({}); ddFence:Set({}); ddPlant:Set({}); ddRock:Set({}); ddBuild:Set({}); ddArch:Set({}); ddLight:Set({})
 end})
 
--- Render loop: handle auto-buy logic for Tadpoles, Ribbit, Pickup, Sell, and Buy Lounge Items
+-- Render loop: handle auto-buy logic for Tadpoles, Gears (Ribbit), Pickup, Sell, and Buy Lounge Items
 RunService.RenderStepped:Connect(function(deltaTime)
     -- Tadpoles auto-buy (AutoBuy1 controlled by Main toggle "Auto Buy Tadpoles")
     if AutoBuy1 then
@@ -337,7 +341,7 @@ RunService.RenderStepped:Connect(function(deltaTime)
         end
     end
 
-    -- Ribbit auto-buy (AutoBuy3 controlled by Main toggle "Auto Buy Ribbit")
+    -- Gears auto-buy (AutoBuy3 controlled by Main toggle "Auto Buy Gears")
     if AutoBuy3 then
         for _, v in pairs(Ribbit) do
             if ShopRibbit and table.find(ShopRibbit, v[1]) and NumberCoverter(plr.leaderstats.Ribbles.Value) >= v[2] then
