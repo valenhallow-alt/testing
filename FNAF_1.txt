@@ -8,7 +8,7 @@ if _G.RayfieldInstance then
     _G.RayfieldInstance = nil
 end
 
--- UnHub | by LE_GO89 (Farm items moved to Main; Sell All button removed)
+-- UnHub | by LE_GO89 (updated: robust toggle start/stop behavior)
 local Rayfield = loadstring(game:HttpGet('https://raw.githubusercontent.com/UnHub-LEGO/Scripts/refs/heads/main/Rayfield%20Library'))()
 _G.RayfieldInstance = Rayfield
 
@@ -47,13 +47,26 @@ local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 local plr = game.Players.LocalPlayer
 local Players = game.Players
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 -- Feature toggles / state
-local AutoBuyTadpoles, AutoPickUp, AutoBuyGears, RunAntiAfk = false, false, false, nil
+local AutoBuyTadpoles = false
+local AutoPickUp = false
+local AutoBuyGears = false
 local BuyLoungeItems = false
 local PlaceAllTadpoles = false
-local IgnorePickupFor = {} -- table of selected names to ignore
 local AutoSell = false
+local IgnorePickupFor = {} -- table of selected names to ignore
+
+-- Controller tokens to safely start/stop background tasks
+local controllers = {
+    AutoBuyTadpoles = {token = 0},
+    AutoPickUp = {token = 0},
+    AutoBuyGears = {token = 0},
+    BuyLoungeItems = {token = 0},
+    PlaceAllTadpoles = {token = 0},
+    AutoSell = {token = 0}
+}
 
 -- Anti-AFK: always enabled (no toggle in UI)
 do
@@ -132,11 +145,14 @@ if plr and plr.PlayerGui and plr.PlayerGui:FindFirstChild("Lilypad Lounge_Shop")
     end
 end
 
--- Ribbit (Gears) shop data (fallback to static order later)
+-- Ribbit (Gears) shop data (static order used for dropdown)
+local RibbitOptions = {
+    "Frog Labeler","Dripleaf Pad","Emberleaf Pad","Azureleaf Pad","Bug Spray",
+    "Swamp Soother","Pondlight Orb","Frogtag Charm","Runechime Pillar","Pondmother's Phial","Asterveil Catalyst"
+}
 local Ribbit = {}
 local RibbitList = {}
 local ShopRibbit = {}
-
 if plr and plr.PlayerGui and plr.PlayerGui:FindFirstChild("Ribbit Rack_Shop") then
     for i, v in pairs(plr.PlayerGui["Ribbit Rack_Shop"].MainContainer.Container.Frame.Body.Items:GetChildren()) do
         if v:IsA("Frame") then
@@ -146,6 +162,204 @@ if plr and plr.PlayerGui and plr.PlayerGui:FindFirstChild("Ribbit Rack_Shop") th
     for i, v in pairs(Ribbit) do
         table.insert(RibbitList, v[1])
     end
+end
+
+-- Helper: safe invoke purchase for tadpoles
+local function tryPurchaseTadpole(name, mappedName)
+    pcall(function()
+        ReplicatedStorage:WaitForChild("TadpoleShopComms"):WaitForChild("RF"):WaitForChild("OnPurchaseItem"):InvokeServer(name, mappedName)
+    end)
+end
+
+-- Helper: safe invoke purchase for ribbit/gear
+local function tryPurchaseGear(name)
+    pcall(function()
+        ReplicatedStorage:WaitForChild("GearShopComms"):WaitForChild("RF"):WaitForChild("OnPurchaseItem"):InvokeServer(name)
+    end)
+end
+
+-- Helper: safe invoke purchase for lilypad lounge
+local function tryPurchaseLounge(name)
+    pcall(function()
+        ReplicatedStorage:WaitForChild("LilypadLoungeComms"):WaitForChild("RF"):WaitForChild("OnPurchaseItem"):InvokeServer(name)
+    end)
+end
+
+-- Queue-based pickup processor (one request at a time)
+local pickupQueue = {}
+local pickupProcessing = false
+local PICK_DELAY = 0.25
+
+local function enqueuePickup(part)
+    if not part then return end
+    table.insert(pickupQueue, part)
+    if not pickupProcessing then
+        pickupProcessing = true
+        task.spawn(function()
+            while #pickupQueue > 0 do
+                local partToPick = table.remove(pickupQueue, 1)
+                if partToPick and partToPick.Parent then
+                    pcall(function()
+                        ReplicatedStorage:WaitForChild("FrogPickupComms"):WaitForChild("RE"):WaitForChild("Pickup"):FireServer(partToPick)
+                    end)
+                end
+                task.wait(PICK_DELAY)
+            end
+            pickupProcessing = false
+        end)
+    end
+end
+
+-- Start/stop helpers for each background task using controller tokens
+local function startAutoBuyTadpoles()
+    controllers.AutoBuyTadpoles.token = controllers.AutoBuyTadpoles.token + 1
+    local myToken = controllers.AutoBuyTadpoles.token
+    task.spawn(function()
+        while AutoBuyTadpoles and controllers.AutoBuyTadpoles.token == myToken do
+            -- iterate Frog table (shop data) and buy selected items
+            for _, v in pairs(Frog) do
+                if not AutoBuyTadpoles or controllers.AutoBuyTadpoles.token ~= myToken then break end
+                if ShopFrog and table.find(ShopFrog, v[1]) and NumberCoverter(plr.leaderstats.Ribbles.Value) >= v[3] then
+                    tryPurchaseTadpole(v[1], v[2])
+                    task.wait(0.2)
+                end
+            end
+            task.wait(0.6)
+        end
+    end)
+end
+
+local function startAutoBuyGears()
+    controllers.AutoBuyGears.token = controllers.AutoBuyGears.token + 1
+    local myToken = controllers.AutoBuyGears.token
+    task.spawn(function()
+        while AutoBuyGears and controllers.AutoBuyGears.token == myToken do
+            for _, v in pairs(Ribbit) do
+                if not AutoBuyGears or controllers.AutoBuyGears.token ~= myToken then break end
+                if ShopRibbit and table.find(ShopRibbit, v[1]) and NumberCoverter(plr.leaderstats.Ribbles.Value) >= v[2] then
+                    tryPurchaseGear(v[1])
+                    task.wait(0.2)
+                end
+            end
+            task.wait(0.6)
+        end
+    end)
+end
+
+local function startBuyLoungeItems()
+    controllers.BuyLoungeItems.token = controllers.BuyLoungeItems.token + 1
+    local myToken = controllers.BuyLoungeItems.token
+    task.spawn(function()
+        while BuyLoungeItems and controllers.BuyLoungeItems.token == myToken do
+            local selected = {}
+            for _, name in ipairs(LoungeObjects or {}) do selected[name] = true end
+            for _, name in ipairs(LoungePathways or {}) do selected[name] = true end
+            for _, name in ipairs(LoungeFences or {}) do selected[name] = true end
+            for _, name in ipairs(LoungePlants or {}) do selected[name] = true end
+            for _, name in ipairs(LoungeRocks or {}) do selected[name] = true end
+            for _, name in ipairs(LoungeBuildings or {}) do selected[name] = true end
+            for _, name in ipairs(LoungeArches or {}) do selected[name] = true end
+            for _, name in ipairs(LoungeLighting or {}) do selected[name] = true end
+
+            for _, item in pairs(Lilypad) do
+                if not BuyLoungeItems or controllers.BuyLoungeItems.token ~= myToken then break end
+                local itemName = item[1]
+                local itemPrice = item[2] or 0
+                if selected[itemName] and NumberCoverter(plr.leaderstats.Ribbles.Value) >= itemPrice then
+                    tryPurchaseLounge(itemName)
+                    task.wait(0.2)
+                end
+            end
+            task.wait(0.8)
+        end
+    end)
+end
+
+local function startAutoSell()
+    controllers.AutoSell.token = controllers.AutoSell.token + 1
+    local myToken = controllers.AutoSell.token
+    task.spawn(function()
+        while AutoSell and controllers.AutoSell.token == myToken do
+            pcall(function()
+                ReplicatedStorage:WaitForChild("HopNSellComms"):WaitForChild("RE"):WaitForChild("SellAll"):FireServer()
+            end)
+            task.wait(2.0)
+        end
+    end)
+end
+
+local function startPlaceAllTadpoles()
+    controllers.PlaceAllTadpoles.token = controllers.PlaceAllTadpoles.token + 1
+    local myToken = controllers.PlaceAllTadpoles.token
+    task.spawn(function()
+        while PlaceAllTadpoles and controllers.PlaceAllTadpoles.token == myToken do
+            local containers = {}
+            if plr and plr.Backpack then
+                for _, item in pairs(plr.Backpack:GetChildren()) do table.insert(containers, item) end
+            end
+            if plr and plr.Character then
+                for _, item in pairs(plr.Character:GetChildren()) do table.insert(containers, item) end
+            end
+
+            for _, v in pairs(containers) do
+                if not PlaceAllTadpoles or controllers.PlaceAllTadpoles.token ~= myToken then break end
+                if v and v:FindFirstChild("TadpoleToolComms") then
+                    pcall(function()
+                        local args = {
+                            plr.Plot.Value:WaitForChild("SwimableAreas"):WaitForChild("Pond1"):WaitForChild("PlaceArea"),
+                            vector.create(0, 0, 0)
+                        }
+                        v:WaitForChild("TadpoleToolComms"):WaitForChild("RE"):WaitForChild("RequestPlace"):FireServer(unpack(args))
+                    end)
+                    task.wait(0.35)
+                end
+            end
+
+            task.wait(1)
+        end
+    end)
+end
+
+local function startAutoPickUp()
+    controllers.AutoPickUp.token = controllers.AutoPickUp.token + 1
+    local myToken = controllers.AutoPickUp.token
+    task.spawn(function()
+        while AutoPickUp and controllers.AutoPickUp.token == myToken do
+            local entities = (plr.Plot and plr.Plot.Value and plr.Plot.Value.Entities) and plr.Plot.Value.Entities:GetChildren() or {}
+            for _, v in pairs(entities) do
+                if not AutoPickUp or controllers.AutoPickUp.token ~= myToken then break end
+                if v and v:IsA("Part") then
+                    local okToPickup = true
+                    local entityName = ""
+                    pcall(function()
+                        if v:FindFirstChild("DisplayName") and v.DisplayName:IsA("StringValue") then
+                            entityName = tostring(v.DisplayName.Value)
+                        elseif v:FindFirstChild("NameTag") and v.NameTag:IsA("StringValue") then
+                            entityName = tostring(v.NameTag.Value)
+                        else
+                            entityName = tostring(v.Name or (v.Parent and v.Parent.Name) or "")
+                        end
+                    end)
+
+                    local lowerEntity = string.lower(entityName or "")
+                    for _, ignoreName in ipairs(IgnorePickupFor or {}) do
+                        if ignoreName and ignoreName ~= "None" and ignoreName ~= "" then
+                            if string.lower(ignoreName) == lowerEntity then
+                                okToPickup = false
+                                break
+                            end
+                        end
+                    end
+
+                    if okToPickup then
+                        enqueuePickup(v)
+                        task.wait(0.05) -- small spacing to avoid queueing too fast
+                    end
+                end
+            end
+            task.wait(0.6)
+        end
+    end)
 end
 
 -- MAIN tab: includes previous Main items plus Farm items moved here
@@ -158,6 +372,11 @@ Main:CreateToggle({
     Flag = "Buy_Lounge_Items",
     Callback = function(Value)
         BuyLoungeItems = Value
+        if Value then
+            startBuyLoungeItems()
+        else
+            controllers.BuyLoungeItems.token = controllers.BuyLoungeItems.token + 1 -- cancel
+        end
     end,
 })
 
@@ -167,6 +386,11 @@ Main:CreateToggle({
     Flag = "Auto_Buy_Tadpoles",
     Callback = function(Value)
         AutoBuyTadpoles = Value
+        if Value then
+            startAutoBuyTadpoles()
+        else
+            controllers.AutoBuyTadpoles.token = controllers.AutoBuyTadpoles.token + 1
+        end
     end,
 })
 
@@ -176,6 +400,11 @@ Main:CreateToggle({
     Flag = "Auto_Buy_Gears",
     Callback = function(Value)
         AutoBuyGears = Value
+        if Value then
+            startAutoBuyGears()
+        else
+            controllers.AutoBuyGears.token = controllers.AutoBuyGears.token + 1
+        end
     end,
 })
 
@@ -183,10 +412,20 @@ Main:CreateToggle({
 
 Main:CreateToggle({Name = "Auto Sell All", CurrentValue = false, Flag = "Auto_Sell_All", Callback = function(Value)
     AutoSell = Value
+    if Value then
+        startAutoSell()
+    else
+        controllers.AutoSell.token = controllers.AutoSell.token + 1
+    end
 end})
 
 Main:CreateToggle({Name = "Auto Pick Up", CurrentValue = false, Flag = "Auto_Pick_Up", Callback = function(Value)
     AutoPickUp = Value
+    if Value then
+        startAutoPickUp()
+    else
+        controllers.AutoPickUp.token = controllers.AutoPickUp.token + 1
+    end
 end})
 
 -- Ignore Pickup dropdown under Main (display order matches FrogNames)
@@ -209,38 +448,12 @@ Main:CreateToggle({
     Callback = function(Value)
         PlaceAllTadpoles = Value
         if Value then
-            task.spawn(function()
-                while PlaceAllTadpoles do
-                    local containers = {}
-                    if plr and plr.Backpack then
-                        for _, item in pairs(plr.Backpack:GetChildren()) do table.insert(containers, item) end
-                    end
-                    if plr and plr.Character then
-                        for _, item in pairs(plr.Character:GetChildren()) do table.insert(containers, item) end
-                    end
-
-                    for _, v in pairs(containers) do
-                        if not PlaceAllTadpoles then break end
-                        if v and v:FindFirstChild("TadpoleToolComms") then
-                            pcall(function()
-                                local args = {
-                                    plr.Plot.Value:WaitForChild("SwimableAreas"):WaitForChild("Pond1"):WaitForChild("PlaceArea"),
-                                    vector.create(0, 0, 0)
-                                }
-                                v:WaitForChild("TadpoleToolComms"):WaitForChild("RE"):WaitForChild("RequestPlace"):FireServer(unpack(args))
-                            end)
-                            task.wait(0.35)
-                        end
-                    end
-
-                    task.wait(1)
-                end
-            end)
+            startPlaceAllTadpoles()
+        else
+            controllers.PlaceAllTadpoles.token = controllers.PlaceAllTadpoles.token + 1
         end
     end
 })
-
--- Note: Sell All button removed per request (toggle remains)
 
 -- SHOP tab (Lilypad dropdown removed; Tadpoles and Ribbit remain)
 local Shop = Window:CreateTab("Shop", 125058207637011)
@@ -264,12 +477,6 @@ end})
 
 -- Divider between Tadpole Trove and Ribbit Rack
 Shop:CreateDivider()
-
--- Ribbit Rack dropdown: display order set as requested
-local RibbitOptions = {
-    "Frog Labeler","Dripleaf Pad","Emberleaf Pad","Azureleaf Pad","Bug Spray",
-    "Swamp Soother","Pondlight Orb","Frogtag Charm","Runechime Pillar","Pondmother's Phial","Asterveil Catalyst"
-}
 
 local RibbitDrop = Shop:CreateDropdown({
     Name = "Ribbit Rack",
@@ -378,95 +585,28 @@ local ddBuild  = Lounge:CreateDropdown({Name = "Buildings", Options = BuildingsO
 local ddArch   = Lounge:CreateDropdown({Name = "Arches",    Options = ArchesOptions,    CurrentOption = {"None"}, MultipleOptions = true, Flag = "Lounge_Arches",    Callback = function(Value) LoungeArches    = Value end})
 local ddLight  = Lounge:CreateDropdown({Name = "Lighting",  Options = LightingOptions,  CurrentOption = {"None"}, MultipleOptions = true, Flag = "Lounge_Lighting",  Callback = function(Value) LoungeLighting  = Value end})
 
--- Render loop: handle auto-buy logic for Tadpoles, Gears (Ribbit), Pickup, Sell, and Buy Lounge Items
-RunService.RenderStepped:Connect(function(deltaTime)
-    -- Tadpoles auto-buy (AutoBuyTadpoles controlled by Main toggle "Auto Buy Tadpoles")
-    if AutoBuyTadpoles then
-        for _, v in pairs(Frog) do
-            if ShopFrog and table.find(ShopFrog, v[1]) and NumberCoverter(plr.leaderstats.Ribbles.Value) >= v[3] then
-                pcall(function()
-                    game:GetService("ReplicatedStorage"):WaitForChild("TadpoleShopComms"):WaitForChild("RF"):WaitForChild("OnPurchaseItem"):InvokeServer(v[1], v[2])
-                end)
-            end
-        end
-    end
-
-    -- Gears auto-buy (AutoBuyGears controlled by Main toggle "Auto Buy Gears")
-    if AutoBuyGears then
-        for _, v in pairs(Ribbit) do
-            if ShopRibbit and table.find(ShopRibbit, v[1]) and NumberCoverter(plr.leaderstats.Ribbles.Value) >= v[2] then
-                pcall(function()
-                    game:GetService("ReplicatedStorage"):WaitForChild("GearShopComms"):WaitForChild("RF"):WaitForChild("OnPurchaseItem"):InvokeServer(v[1])
-                end)
-            end
-        end
-    end
-
-    -- Auto pickup (skip any entities matching IgnorePickupFor using exact case-insensitive match)
-    if AutoPickUp then
-        for i, v in pairs((plr.Plot and plr.Plot.Value and plr.Plot.Value.Entities) and plr.Plot.Value.Entities:GetChildren() or {}) do
-            if v and v:IsA("Part") then
-                local okToPickup = true
-                local entityName = ""
-                -- try to read a display name if present, otherwise fallback to v.Name or parent name
-                pcall(function()
-                    if v:FindFirstChild("DisplayName") and v.DisplayName:IsA("StringValue") then
-                        entityName = tostring(v.DisplayName.Value)
-                    elseif v:FindFirstChild("NameTag") and v.NameTag:IsA("StringValue") then
-                        entityName = tostring(v.NameTag.Value)
-                    else
-                        entityName = tostring(v.Name or (v.Parent and v.Parent.Name) or "")
-                    end
-                end)
-
-                local lowerEntity = string.lower(entityName or "")
-
-                for _, ignoreName in ipairs(IgnorePickupFor or {}) do
-                    if ignoreName and ignoreName ~= "None" and ignoreName ~= "" then
-                        if string.lower(ignoreName) == lowerEntity then
-                            okToPickup = false
-                            break
-                        end
-                    end
-                end
-
-                if okToPickup then
-                    pcall(function()
-                        game:GetService("ReplicatedStorage"):WaitForChild("FrogPickupComms"):WaitForChild("RE"):WaitForChild("Pickup"):FireServer(v)
-                    end)
-                end
-            end
-        end
-    end
-
-    -- Auto sell (toggle only; Sell All button removed)
-    if AutoSell then
-        game:GetService("ReplicatedStorage"):WaitForChild("HopNSellComms"):WaitForChild("RE"):WaitForChild("SellAll"):FireServer()
-    end
-
-    -- Buy Lounge Items: combine all selected lounge dropdowns and purchase matching Lilypad shop items
-    if BuyLoungeItems then
-        local selected = {}
-        for _, name in ipairs(LoungeObjects or {}) do selected[name] = true end
-        for _, name in ipairs(LoungePathways or {}) do selected[name] = true end
-        for _, name in ipairs(LoungeFences or {}) do selected[name] = true end
-        for _, name in ipairs(LoungePlants or {}) do selected[name] = true end
-        for _, name in ipairs(LoungeRocks or {}) do selected[name] = true end
-        for _, name in ipairs(LoungeBuildings or {}) do selected[name] = true end
-        for _, name in ipairs(LoungeArches or {}) do selected[name] = true end
-        for _, name in ipairs(LoungeLighting or {}) do selected[name] = true end
-
-        for _, item in pairs(Lilypad) do
-            local itemName = item[1]
-            local itemPrice = item[2] or 0
-            if selected[itemName] and NumberCoverter(plr.leaderstats.Ribbles.Value) >= itemPrice then
-                pcall(function()
-                    game:GetService("ReplicatedStorage"):WaitForChild("LilypadLoungeComms"):WaitForChild("RF"):WaitForChild("OnPurchaseItem"):InvokeServer(itemName)
-                end)
-            end
-        end
+-- Ensure IgnoreDropdown uses the exact FrogNames order (in case UI created earlier)
+pcall(function()
+    if IgnoreDropdown and type(IgnoreDropdown.Refresh) == "function" then
+        IgnoreDropdown:Refresh(FrogNames)
     end
 end)
+
+-- Final safety: ensure controllers are cancelled when UI destroyed (so toggles stop if UI removed)
+if _G.RayfieldInstance then
+    pcall(function()
+        local oldDestroy = _G.RayfieldInstance.Destroy
+        if type(oldDestroy) == "function" then
+            _G.RayfieldInstance.Destroy = function(self, ...)
+                -- cancel all controllers
+                for k,_ in pairs(controllers) do
+                    controllers[k].token = controllers[k].token + 1
+                end
+                return oldDestroy(self, ...)
+            end
+        end
+    end)
+end
 
 -- Suppress the "Cannot pick up a favorited frog." alert by removing UI elements that contain that text.
 do
