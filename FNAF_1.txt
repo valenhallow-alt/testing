@@ -8,7 +8,7 @@ if _G.RayfieldInstance then
     _G.RayfieldInstance = nil
 end
 
--- UnHub | by LE_GO89 (final consolidated script with moved lounge buttons)
+-- UnHub | by LE_GO89 (updated: removed "Pick Up All" button and suppress favorited frog alert)
 local Rayfield = loadstring(game:HttpGet('https://raw.githubusercontent.com/UnHub-LEGO/Scripts/refs/heads/main/Rayfield%20Library'))()
 _G.RayfieldInstance = Rayfield
 
@@ -170,15 +170,7 @@ Farm:CreateToggle({Name = "Auto Pick Up", CurrentValue = false, Flag = "Auto_Pic
     AutoPickUp = Value
 end})
 
-Farm:CreateButton({Name = "Pick Up All", Callback = function()
-    for i, v in pairs(plr.Plot.Value.Entities:GetChildren()) do
-        if v:IsA("Part") then
-            task.spawn(function()
-                game:GetService("ReplicatedStorage"):WaitForChild("FrogPickupComms"):WaitForChild("RE"):WaitForChild("Pickup"):FireServer(v)
-            end)
-        end
-    end
-end})
+-- "Pick Up All" button removed as requested
 
 Farm:CreateButton({Name = "Sell All", Callback = function()
     game:GetService("ReplicatedStorage"):WaitForChild("HopNSellComms"):WaitForChild("RE"):WaitForChild("SellAll"):FireServer()
@@ -352,8 +344,6 @@ local ddBuild  = Lounge:CreateDropdown({Name = "Buildings", Options = BuildingsO
 local ddArch   = Lounge:CreateDropdown({Name = "Arches",    Options = ArchesOptions,    CurrentOption = {"None"}, MultipleOptions = true, Flag = "Lounge_Arches",    Callback = function(Value) LoungeArches    = Value end})
 local ddLight  = Lounge:CreateDropdown({Name = "Lighting",  Options = LightingOptions,  CurrentOption = {"None"}, MultipleOptions = true, Flag = "Lounge_Lighting",  Callback = function(Value) LoungeLighting  = Value end})
 
--- Note: the lounge select/clear buttons were moved to the Shop tab (above)
-
 -- Render loop: handle auto-buy logic for Tadpoles, Gears (Ribbit), Pickup, Sell, and Buy Lounge Items
 RunService.RenderStepped:Connect(function(deltaTime)
     -- Tadpoles auto-buy (AutoBuyTadpoles controlled by Main toggle "Auto Buy Tadpoles")
@@ -382,7 +372,10 @@ RunService.RenderStepped:Connect(function(deltaTime)
     if AutoPickUp then
         for i, v in pairs(plr.Plot.Value.Entities:GetChildren()) do
             if v:IsA("Part") then
-                game:GetService("ReplicatedStorage"):WaitForChild("FrogPickupComms"):WaitForChild("RE"):WaitForChild("Pickup"):FireServer(v)
+                -- attempt pickup but ignore errors (including favorited/locked frogs)
+                pcall(function()
+                    game:GetService("ReplicatedStorage"):WaitForChild("FrogPickupComms"):WaitForChild("RE"):WaitForChild("Pickup"):FireServer(v)
+                end)
             end
         end
     end
@@ -415,3 +408,73 @@ RunService.RenderStepped:Connect(function(deltaTime)
         end
     end
 end)
+
+-- Suppress the "Cannot pick up a favorited frog." alert by removing UI elements that contain that text.
+-- This listens for new GUI descendants in CoreGui and PlayerGui and destroys any TextLabel/TextButton/TextBox that contains the message.
+do
+    local TARGET_TEXT = "Cannot pick up a favorited frog"
+    local function checkAndRemove(desc)
+        if not desc or not desc.Parent then return end
+        local ok, isText = pcall(function()
+            return desc:IsA("TextLabel") or desc:IsA("TextButton") or desc:IsA("TextBox")
+        end)
+        if ok and isText then
+            local text = ""
+            pcall(function() text = tostring(desc.Text or "") end)
+            if text:find(TARGET_TEXT) then
+                pcall(function()
+                    -- try to remove the nearest reasonable parent container to avoid leaving stray UI
+                    local parent = desc.Parent
+                    -- climb up a few levels to remove the notification container if present
+                    for i = 1, 4 do
+                        if parent == nil then break end
+                        if parent:IsA("ScreenGui") or parent:IsA("Frame") or parent:IsA("ImageLabel") then
+                            parent:Destroy()
+                            return
+                        end
+                        parent = parent.Parent
+                    end
+                    -- fallback: destroy the element itself
+                    desc:Destroy()
+                end)
+            end
+        end
+    end
+
+    -- scan existing CoreGui descendants
+    pcall(function()
+        for _, d in pairs(game:GetService("CoreGui"):GetDescendants()) do
+            checkAndRemove(d)
+        end
+    end)
+
+    -- scan existing PlayerGui descendants
+    pcall(function()
+        if plr and plr:FindFirstChild("PlayerGui") then
+            for _, d in pairs(plr.PlayerGui:GetDescendants()) do
+                checkAndRemove(d)
+            end
+        end
+    end)
+
+    -- connect to future additions in CoreGui
+    pcall(function()
+        game:GetService("CoreGui").DescendantAdded:Connect(function(desc)
+            -- small delay to allow text to be set by the game
+            task.defer(function()
+                checkAndRemove(desc)
+            end)
+        end)
+    end)
+
+    -- connect to future additions in PlayerGui
+    pcall(function()
+        if plr and plr:FindFirstChild("PlayerGui") then
+            plr.PlayerGui.DescendantAdded:Connect(function(desc)
+                task.defer(function()
+                    checkAndRemove(desc)
+                end)
+            end)
+        end
+    end)
+end
