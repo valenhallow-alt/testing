@@ -1,3 +1,4 @@
+-- UnHub | by LE_GO89 (with Lounge tab added)
 local Rayfield = loadstring(game:HttpGet('https://raw.githubusercontent.com/UnHub-LEGO/Scripts/refs/heads/main/Rayfield%20Library'))()
 
 local Window = Rayfield:CreateWindow({
@@ -38,24 +39,24 @@ local Players = game.Players
 local AutoBuy1, AutoPickUp, AutoBuy2, AutoBuy3, RunAntiAfk = false, false, false, false, nil
 
 local multipliers = {
-	K = 1e3,
-	M = 1e6,
-	B = 1e9,
-	T = 1e12
+    K = 1e3,
+    M = 1e6,
+    B = 1e9,
+    T = 1e12
 }
 
 local function NumberCoverter(text)
-	text = tostring(text):upper()
+    text = tostring(text):upper()
 
-	local value, suffix = text:match("([%d%.]+)%s*([KMBT]?)")
-	value = tonumber(value)
-	if not value then return nil end
+    local value, suffix = text:match("([%d%.]+)%s*([KMBT]?)")
+    value = tonumber(value)
+    if not value then return nil end
 
-	if suffix ~= "" and multipliers[suffix] then
-		return value * multipliers[suffix]
-	end
+    if suffix ~= "" and multipliers[suffix] then
+        return value * multipliers[suffix]
+    end
 
-	return value
+    return value
 end
 
 local Frog = {}
@@ -63,12 +64,12 @@ local FrogList = {}
 local ShopFrog = {}
 
 for i, v in pairs(plr.PlayerGui["Tadpole Trove_Shop"].MainContainer.Container.Frame.Body.Items:GetChildren()) do
-	if v:IsA("Frame") and v.Name:find(" Tadpole") then
-		table.insert(Frog, {v.Name, v.Name:gsub(" Tadpole", " Frog"), tonumber(NumberCoverter(v.Right.PriceSection.Button.Amount.Text))})
-	end
+    if v:IsA("Frame") and v.Name:find(" Tadpole") then
+        table.insert(Frog, {v.Name, v.Name:gsub(" Tadpole", " Frog"), tonumber(NumberCoverter(v.Right.PriceSection.Button.Amount.Text))})
+    end
 end
 for i, v in pairs(Frog) do
-	table.insert(FrogList, v[1])
+    table.insert(FrogList, v[1])
 end
 
 local Lilypad = {}
@@ -76,12 +77,12 @@ local LilypadList = {}
 local ShopLilypad = {}
 
 for i, v in pairs(game:GetService("Players").LocalPlayer.PlayerGui["Lilypad Lounge_Shop"].MainContainer.Container.Frame.Body.Items:GetChildren()) do
-	if v:IsA("Frame") then
-		table.insert(Lilypad, {v.Name, tonumber(NumberCoverter(v.Right.PriceSection.Button.Amount.Text))})
-	end
+    if v:IsA("Frame") then
+        table.insert(Lilypad, {v.Name, tonumber(NumberCoverter(v.Right.PriceSection.Button.Amount.Text))})
+    end
 end
 for i, v in pairs(Lilypad) do
-	table.insert(LilypadList, v[1])
+    table.insert(LilypadList, v[1])
 end
 
 local Ribbit = {}
@@ -89,12 +90,12 @@ local RibbitList = {}
 local ShopRibbit = {}
 
 for i, v in pairs(game:GetService("Players").LocalPlayer.PlayerGui["Ribbit Rack_Shop"].MainContainer.Container.Frame.Body.Items:GetChildren()) do
-	if v:IsA("Frame") then
-		table.insert(Ribbit, {v.Name, tonumber(NumberCoverter(v.Right.PriceSection.Button.Amount.Text))})
-	end
+    if v:IsA("Frame") then
+        table.insert(Ribbit, {v.Name, tonumber(NumberCoverter(v.Right.PriceSection.Button.Amount.Text))})
+    end
 end
 for i, v in pairs(Ribbit) do
-	table.insert(RibbitList, v[1])
+    table.insert(RibbitList, v[1])
 end
 
 local Main = Window:CreateTab("Main", 125058207637011)
@@ -103,11 +104,11 @@ Main:CreateSection("Main")
 Main:CreateToggle({Name = "Anti Afk Bypass", CurrentValue = false, Flag = "Toggle1", Callback = function(Value)
     local vu = game:GetService("VirtualUser")
     if Value then
-    	RunAntiAfk = game:GetService("Players").LocalPlayer.Idled:connect(function()
-    		vu:Button2Down(Vector2.new(0,0),workspace.CurrentCamera.CFrame)
-    		wait(1)
-    		vu:Button2Up(Vector2.new(0,0),workspace.CurrentCamera.CFrame)
-    	end)
+        RunAntiAfk = game:GetService("Players").LocalPlayer.Idled:connect(function()
+            vu:Button2Down(Vector2.new(0,0),workspace.CurrentCamera.CFrame)
+            wait(1)
+            vu:Button2Up(Vector2.new(0,0),workspace.CurrentCamera.CFrame)
+        end)
     else
         if RunAntiAfk then
             RunAntiAfk:Disconnect()
@@ -154,13 +155,13 @@ Farm:CreateToggle({Name = "Auto Pick Up", CurrentValue = false, Flag = "Toggle1"
 end})
 
 Farm:CreateButton({Name = "Pick Up All", Callback = function()
-	for i, v in pairs(plr.Plot.Value.Entities:GetChildren()) do
-		if v:IsA("Part") then
-		    task.spawn(function()
-			    game:GetService("ReplicatedStorage"):WaitForChild("FrogPickupComms"):WaitForChild("RE"):WaitForChild("Pickup"):FireServer(v)
-			end)
-		end
-	end
+    for i, v in pairs(plr.Plot.Value.Entities:GetChildren()) do
+        if v:IsA("Part") then
+            task.spawn(function()
+                game:GetService("ReplicatedStorage"):WaitForChild("FrogPickupComms"):WaitForChild("RE"):WaitForChild("Pickup"):FireServer(v)
+            end)
+        end
+    end
 end})
 
 Farm:CreateButton({Name = "Sell All", Callback = function()
@@ -168,14 +169,27 @@ Farm:CreateButton({Name = "Sell All", Callback = function()
 end})
 
 Farm:CreateButton({Name = "Place All Tadpole", Callback = function()
-    for i, v in pairs() do
+    -- iterate over Backpack and Character to find tadpole tools
+    local containers = {}
+    for _, item in pairs(plr.Backpack:GetChildren()) do table.insert(containers, item) end
+    if plr.Character then
+        for _, item in pairs(plr.Character:GetChildren()) do table.insert(containers, item) end
+    end
+
+    for _, v in pairs(containers) do
         if v:FindFirstChild("TadpoleToolComms") then
             task.spawn(function()
-                local args = {
-                	plr.Plot.Value:WaitForChild("SwimableAreas"):WaitForChild("Pond1"):WaitForChild("PlaceArea"),
-                	vector.create(0, 0, 0)
-                }
-                v:WaitForChild("TadpoleToolComms"):WaitForChild("RE"):WaitForChild("RequestPlace"):FireServer(unpack(args))
+                local success, err = pcall(function()
+                    local args = {
+                        plr.Plot.Value:WaitForChild("SwimableAreas"):WaitForChild("Pond1"):WaitForChild("PlaceArea"),
+                        vector.create(0, 0, 0)
+                    }
+                    v:WaitForChild("TadpoleToolComms"):WaitForChild("RE"):WaitForChild("RequestPlace"):FireServer(unpack(args))
+                end)
+                if not success then
+                    -- optional: warn in output if needed
+                    -- warn("Place All Tadpole error: "..tostring(err))
+                end
             end)
         end
     end
@@ -189,7 +203,7 @@ local Tadpoles = Shop:CreateDropdown({Name = "Tadpoles Trove", Options = FrogLis
 end})
 
 Shop:CreateButton({Name = "Select All", Callback = function()
-	Tadpoles:Set(FrogList)
+    Tadpoles:Set(FrogList)
 end})
 
 Shop:CreateToggle({Name = "Auto Buy", CurrentValue = false, Flag = "Toggle1", Callback = function(Value)
@@ -201,7 +215,7 @@ local LilypadDrop = Shop:CreateDropdown({Name = "Lilypad Lounge", Options = Lily
 end})
 
 Shop:CreateButton({Name = "Select All", Callback = function()
-	LilypadDrop:Set(LilypadList)
+    LilypadDrop:Set(LilypadList)
 end})
 
 Shop:CreateToggle({Name = "Auto Buy", CurrentValue = false, Flag = "Toggle1", Callback = function(Value)
@@ -213,43 +227,82 @@ local RibbitDrop = Shop:CreateDropdown({Name = "Ribbit Rack", Options = RibbitLi
 end})
 
 Shop:CreateButton({Name = "Select All", Callback = function()
-	RibbitDrop:Set(RibbitList)
+    RibbitDrop:Set(RibbitList)
 end})
 
 Shop:CreateToggle({Name = "Auto Buy", CurrentValue = false, Flag = "Toggle1", Callback = function(Value)
     AutoBuy3 = Value
 end})
 
+-- Lounge tab and dropdowns (added)
+local Lounge = Window:CreateTab("Lounge", 125058207637011)
+Lounge:CreateSection("Lounge")
+
+-- Placeholder option lists — replace with actual in-game names
+local ObjectsOptions   = {"Bench","Fountain","Statue"}
+local PathwaysOptions  = {"Gravel Path","Stone Path","Wooden Plank"}
+local FencesOptions    = {"Wood Fence","Stone Fence","Bamboo Fence"}
+local PlantsOptions    = {"Fern","Lotus","Reed"}
+local RocksOptions     = {"Small Rock","Medium Rock","Large Boulder"}
+local BuildingsOptions = {"Shed","Gazebo","BridgeHouse"}
+local ArchesOptions    = {"Stone Arch","Wood Arch"}
+local LightingOptions  = {"Lantern","Torch","Glowstone"}
+
+-- Variables to hold current selections
+local LoungeObjects, LoungePathways, LoungeFences, LoungePlants, LoungeRocks, LoungeBuildings, LoungeArches, LoungeLighting =
+    {}, {}, {}, {}, {}, {}, {}, {}
+
+-- Create dropdowns (multiple choice)
+local ddObjects = Lounge:CreateDropdown({Name = "Objects",   Options = ObjectsOptions,   CurrentOption = {"None"}, MultipleOptions = true, Flag = "Lounge_Objects",   Callback = function(Value) LoungeObjects   = Value end})
+local ddPath   = Lounge:CreateDropdown({Name = "Pathways",  Options = PathwaysOptions,  CurrentOption = {"None"}, MultipleOptions = true, Flag = "Lounge_Pathways",  Callback = function(Value) LoungePathways  = Value end})
+local ddFence  = Lounge:CreateDropdown({Name = "Fences",    Options = FencesOptions,    CurrentOption = {"None"}, MultipleOptions = true, Flag = "Lounge_Fences",    Callback = function(Value) LoungeFences    = Value end})
+local ddPlant  = Lounge:CreateDropdown({Name = "Plants",    Options = PlantsOptions,    CurrentOption = {"None"}, MultipleOptions = true, Flag = "Lounge_Plants",    Callback = function(Value) LoungePlants    = Value end})
+local ddRock   = Lounge:CreateDropdown({Name = "Rocks",     Options = RocksOptions,     CurrentOption = {"None"}, MultipleOptions = true, Flag = "Lounge_Rocks",     Callback = function(Value) LoungeRocks     = Value end})
+local ddBuild  = Lounge:CreateDropdown({Name = "Buildings", Options = BuildingsOptions, CurrentOption = {"None"}, MultipleOptions = true, Flag = "Lounge_Buildings", Callback = function(Value) LoungeBuildings = Value end})
+local ddArch   = Lounge:CreateDropdown({Name = "Arches",    Options = ArchesOptions,    CurrentOption = {"None"}, MultipleOptions = true, Flag = "Lounge_Arches",    Callback = function(Value) LoungeArches    = Value end})
+local ddLight  = Lounge:CreateDropdown({Name = "Lighting",  Options = LightingOptions,  CurrentOption = {"None"}, MultipleOptions = true, Flag = "Lounge_Lighting",  Callback = function(Value) LoungeLighting  = Value end})
+
+-- Helper buttons: Select All and Clear All for convenience
+Lounge:CreateButton({Name = "Select All All", Callback = function()
+    ddObjects:Set(ObjectsOptions); ddPath:Set(PathwaysOptions); ddFence:Set(FencesOptions);
+    ddPlant:Set(PlantsOptions); ddRock:Set(RocksOptions); ddBuild:Set(BuildingsOptions);
+    ddArch:Set(ArchesOptions); ddLight:Set(LightingOptions)
+end})
+
+Lounge:CreateButton({Name = "Clear All Selections", Callback = function()
+    ddObjects:Set({}); ddPath:Set({}); ddFence:Set({}); ddPlant:Set({}); ddRock:Set({}); ddBuild:Set({}); ddArch:Set({}); ddLight:Set({})
+end})
+
 RunService.RenderStepped:Connect(function(deltaTime)
-	if AutoBuy1 then
-		for _, v in pairs(Frog) do
-			if ShopFrog and table.find(ShopFrog, v[1]) and NumberCoverter(plr.leaderstats.Ribbles.Value) >= v[3] then
-				game:GetService("ReplicatedStorage"):WaitForChild("TadpoleShopComms"):WaitForChild("RF"):WaitForChild("OnPurchaseItem"):InvokeServer(v[1], v[2])
-			end
-		end
-	end
-	if AutoBuy2 then
-		for _, v in pairs(Lilypad) do
-			if ShopLilypad and table.find(ShopLilypad, v[1]) and NumberCoverter(plr.leaderstats.Ribbles.Value) >= v[2] then
-				game:GetService("ReplicatedStorage"):WaitForChild("LilypadLoungeComms"):WaitForChild("RF"):WaitForChild("OnPurchaseItem"):InvokeServer(v[1])
-			end
-		end
-	end
-	if AutoBuy3 then
-		for _, v in pairs(Ribbit) do
-			if ShopRibbit and table.find(ShopRibbit, v[1]) and NumberCoverter(plr.leaderstats.Ribbles.Value) >= v[2] then
-				game:GetService("ReplicatedStorage"):WaitForChild("GearShopComms"):WaitForChild("RF"):WaitForChild("OnPurchaseItem"):InvokeServer(v[1])
-			end
-		end
-	end
-	if AutoPickUp then
-		for i, v in pairs(plr.Plot.Value.Entities:GetChildren()) do
-			if v:IsA("Part") then
-				game:GetService("ReplicatedStorage"):WaitForChild("FrogPickupComms"):WaitForChild("RE"):WaitForChild("Pickup"):FireServer(v)
-			end
-		end
-	end
-	if AutoSell then
-		game:GetService("ReplicatedStorage"):WaitForChild("HopNSellComms"):WaitForChild("RE"):WaitForChild("SellAll"):FireServer()
-	end
+    if AutoBuy1 then
+        for _, v in pairs(Frog) do
+            if ShopFrog and table.find(ShopFrog, v[1]) and NumberCoverter(plr.leaderstats.Ribbles.Value) >= v[3] then
+                game:GetService("ReplicatedStorage"):WaitForChild("TadpoleShopComms"):WaitForChild("RF"):WaitForChild("OnPurchaseItem"):InvokeServer(v[1], v[2])
+            end
+        end
+    end
+    if AutoBuy2 then
+        for _, v in pairs(Lilypad) do
+            if ShopLilypad and table.find(ShopLilypad, v[1]) and NumberCoverter(plr.leaderstats.Ribbles.Value) >= v[2] then
+                game:GetService("ReplicatedStorage"):WaitForChild("LilypadLoungeComms"):WaitForChild("RF"):WaitForChild("OnPurchaseItem"):InvokeServer(v[1])
+            end
+        end
+    end
+    if AutoBuy3 then
+        for _, v in pairs(Ribbit) do
+            if ShopRibbit and table.find(ShopRibbit, v[1]) and NumberCoverter(plr.leaderstats.Ribbles.Value) >= v[2] then
+                game:GetService("ReplicatedStorage"):WaitForChild("GearShopComms"):WaitForChild("RF"):WaitForChild("OnPurchaseItem"):InvokeServer(v[1])
+            end
+        end
+    end
+    if AutoPickUp then
+        for i, v in pairs(plr.Plot.Value.Entities:GetChildren()) do
+            if v:IsA("Part") then
+                game:GetService("ReplicatedStorage"):WaitForChild("FrogPickupComms"):WaitForChild("RE"):WaitForChild("Pickup"):FireServer(v)
+            end
+        end
+    end
+    if AutoSell then
+        game:GetService("ReplicatedStorage"):WaitForChild("HopNSellComms"):WaitForChild("RE"):WaitForChild("SellAll"):FireServer()
+    end
 end)
