@@ -40,6 +40,35 @@ local Window = Rayfield:CreateWindow({
     }
 })
 
+-- Small draggable ImageButton to toggle Rayfield (custom image)
+do
+    local ST = Instance.new("ScreenGui")
+    local T = Instance.new("ImageButton")
+    local Corner = Instance.new("UICorner")
+
+    ST.Name = "Toggle UnHub"
+    -- Parent to the same parent Rayfield uses so it appears in the same UI context
+    ST.Parent = Rayfield:GetParent().Parent
+    ST.ResetOnSpawn = false
+
+    T.Name = "UnHubToggle"
+    T.Parent = ST
+    T.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    T.Position = UDim2.new(0, 30, 0.08, 0)
+    T.Size = UDim2.new(0, 50, 0, 50)
+    T.Image = "rbxassetid://112045743772867" -- replace with your decal id if desired
+    T.Active = true
+    T.Draggable = true
+
+    Corner.Name = "Corner"
+    Corner.Parent = T
+    Corner.CornerRadius = UDim.new(0, 8)
+
+    T.MouseButton1Click:Connect(function()
+        Rayfield:SetEnable(not Rayfield:GetEnable())
+    end)
+end
+
 local RunService = game:GetService("RunService")
 local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
