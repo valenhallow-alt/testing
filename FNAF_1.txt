@@ -82,29 +82,203 @@ do
     end)
 end
 
--- === Added: Main tab with Auto Buy Egg toggle ===
+-- === Added: Main tab with Auto Buy Egg toggle (with dynamic detection & purchase) ===
 do
-    -- Create "Main" tab (use an icon id or 0 for none)
     local MainTab = Window:CreateTab("Main", 4483362458)
     local MainSection = MainTab:CreateSection("Main")
 
     -- Global flag used by the toggle loop
     _G.UnHub_AutoBuyEgg = _G.UnHub_AutoBuyEgg or false
 
-    -- Helper: safe proximity prompt fire (works in many exploit environments)
-    local function tryFireProximityPrompt(prompt)
-        local ok, err = pcall(function()
-            if typeof(fireproximityprompt) == "function" then
-                fireproximityprompt(prompt)
-            elseif prompt:IsA("ProximityPrompt") and prompt.Parent and prompt.Parent:FindFirstChildOfClass("ClickDetector") then
-                -- fallback attempt: click detector (not guaranteed)
-                local cd = prompt.Parent:FindFirstChildOfClass("ClickDetector")
-                if cd and typeof(cd.MouseClick) == "RBXScriptSignal" then
-                    cd:FireAllClients()
+    -- Helper: locate the purchase remote at the exact path provided
+    local function getPurchaseRemote()
+        local ok, conduitInstances = pcall(function()
+            return game:GetService("ReplicatedStorage")
+                :WaitForChild("Modules", 2)
+                :WaitForChild("Internals", 2)
+                :WaitForChild("Skeleton", 2)
+                :WaitForChild("Conduit", 2)
+                :WaitForChild("Instances", 2)
+        end)
+        if not ok or not conduitInstances then return nil end
+        local rem = conduitInstances:FindFirstChild("_purchaseEgg")
+        return rem
+    end
+
+    -- Helper: try to extract fields from an Instance using multiple heuristics
+    local function extractEggDataFromInstance(inst)
+        if not inst or not inst:IsA("Instance") then return nil end
+
+        local function tryAttr(name)
+            local ok, v = pcall(function() return inst:GetAttribute(name) end)
+            if ok and v ~= nil then return tostring(v) end
+            return nil
+        end
+
+        local function tryChildValue(name)
+            -- direct child with ValueBase
+            local c = inst:FindFirstChild(name)
+            if c and c:IsA("ValueBase") then
+                return tostring(c.Value)
+            end
+            -- case-insensitive search among children
+            for _, child in ipairs(inst:GetChildren()) do
+                if child:IsA("ValueBase") and string.lower(child.Name) == string.lower(name) then
+                    return tostring(child.Value)
                 end
             end
-        end)
-        return ok
+            return nil
+        end
+
+        local function tryGuiTextSearch(root)
+            for _, d in ipairs(root:GetDescendants()) do
+                if d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox") then
+                    local txt = tostring(d.Text or "")
+                    -- patterns like "id: entity_Piccolo_egg" or "rarity: Basic"
+                    local id = txt:match("id[:%s]*([%w_%-%:]+)")
+                    local rarity = txt:match("rarity[:%s]*([%w_%-%:]+)")
+                    local variety = txt:match("variety[:%s]*([%w_%-%:]+)")
+                    if id or rarity or variety then
+                        return id, rarity, variety
+                    end
+                end
+            end
+            return nil, nil, nil
+        end
+
+        -- 1) Attributes
+        local id = tryAttr("id") or tryAttr("Id") or tryAttr("egg_id") or tryAttr("eggId")
+        local rarity = tryAttr("rarity") or tryAttr("Rarity")
+        local variety = tryAttr("variety") or tryAttr("Variety")
+
+        -- 2) Child Value objects
+        id = id or tryChildValue("id") or tryChildValue("Id") or tryChildValue("egg_id") or tryChildValue("Name")
+        rarity = rarity or tryChildValue("rarity") or tryChildValue("Rarity")
+        variety = variety or tryChildValue("variety") or tryChildValue("Variety")
+
+        -- 3) GUI text (BillboardGui etc.)
+        if (not id or id == "") and inst:FindFirstChildOfClass("BillboardGui") then
+            local gId, gRarity, gVariety = tryGuiTextSearch(inst)
+            id = id or gId
+            rarity = rarity or gRarity
+            variety = variety or gVariety
+        end
+
+        -- 4) If instance has a child named "data" that is a table-like Value (StringValue with JSON-ish text)
+        local dataChild = inst:FindFirstChild("data")
+        if (not id or not rarity or not variety) and dataChild and dataChild:IsA("StringValue") then
+            local txt = dataChild.Value or ""
+            -- try to extract tokens from JSON-like string
+            local jId = txt:match('"id"%s*:%s*"(.-)"') or txt:match("'id'%s*:%s*'(.-)'")
+            local jRarity = txt:match('"rarity"%s*:%s*"(.-)"') or txt:match("'rarity'%s*:%s*'(.-)'")
+            local jVariety = txt:match('"variety"%s*:%s*"(.-)"') or txt:match("'variety'%s*:%s*'(.-)'")
+            id = id or jId
+            rarity = rarity or jRarity
+            variety = variety or jVariety
+        end
+
+        -- 5) Fallback to name parsing (last resort)
+        if not id or id == "" then
+            local n = inst.Name or ""
+            if n:lower():find("egg") then
+                local token = n:match("([%w_%-]+_egg)") or n:match("([%w_%-]+)")
+                if token then id = token end
+            end
+        end
+
+        if id and rarity and variety then
+            return {
+                id = tostring(id),
+                rarity = tostring(rarity),
+                variety = tostring(variety)
+            }
+        end
+
+        return nil
+    end
+
+    -- Heuristic: scan likely places for egg objects and return first match
+    local function findEggInWorld()
+        local candidates = { workspace }
+        if workspace:FindFirstChild("Plots") then table.insert(candidates, workspace.Plots) end
+        if workspace:FindFirstChild("Shop") then table.insert(candidates, workspace.Shop) end
+        if workspace:FindFirstChild("EggShop") then table.insert(candidates, workspace.EggShop) end
+
+        for _, root in ipairs(candidates) do
+            for _, obj in ipairs(root:GetDescendants()) do
+                local name = (obj.Name or ""):lower()
+                if name:find("egg") or name:find("conveyor") or name:find("shop") or obj:FindFirstChild("Essentials") or obj:FindFirstChild("ConveyorVisual") then
+                    local data = extractEggDataFromInstance(obj)
+                    if data then
+                        return data, obj
+                    end
+                end
+            end
+        end
+
+        -- final fallback: scan workspace for any instance with attributes that look like egg data
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            local data = extractEggDataFromInstance(obj)
+            if data then return data, obj end
+        end
+
+        return nil, nil
+    end
+
+    -- Build args table in the exact shape you provided
+    local function buildArgsTable(eggData)
+        if not eggData then return nil end
+        local args = {
+            {
+                __raw = true,
+                data = {
+                    id = eggData.id,
+                    rarity = eggData.rarity,
+                    variety = eggData.variety
+                }
+            }
+        }
+        return args
+    end
+
+    -- Main attempt function used by the AutoBuy loop
+    local function attemptAutoBuy()
+        local purchaseRemote = getPurchaseRemote()
+        if not purchaseRemote then return false end
+
+        -- Try to find egg data in world
+        local eggData, eggInstance = findEggInWorld()
+
+        -- If not found in world, try PlayerGui text heuristics
+        if not eggData then
+            local player = game:GetService("Players").LocalPlayer
+            if player and player:FindFirstChild("PlayerGui") then
+                for _, gui in ipairs(player.PlayerGui:GetDescendants()) do
+                    if gui:IsA("TextLabel") or gui:IsA("TextButton") or gui:IsA("TextBox") then
+                        local txt = tostring(gui.Text or "")
+                        local id = txt:match("id[:%s]*([%w_%-%:]+)")
+                        local rarity = txt:match("rarity[:%s]*([%w_%-%:]+)")
+                        local variety = txt:match("variety[:%s]*([%w_%-%:]+)")
+                        if id and rarity and variety then
+                            eggData = { id = id, rarity = rarity, variety = variety }
+                            break
+                        end
+                    end
+                end
+            end
+        end
+
+        if eggData then
+            local args = buildArgsTable(eggData)
+            if args then
+                pcall(function()
+                    purchaseRemote:FireServer(unpack(args))
+                end)
+                return true
+            end
+        end
+
+        return false
     end
 
     -- Create the Auto Buy Egg toggle
@@ -116,62 +290,11 @@ do
             _G.UnHub_AutoBuyEgg = Value
 
             if Value then
-                -- Start a loop that attempts to buy eggs while enabled
                 spawn(function()
                     while _G.UnHub_AutoBuyEgg do
-                        pcall(function()
-                            -- Example strategies (attempt common remote names, then proximity prompts)
-                            local success = false
-
-                            -- 1) Try common RemoteEvent/RemoteFunction names in ReplicatedStorage
-                            local rs = game:GetService("ReplicatedStorage")
-                            if rs then
-                                local candidates = {"BuyEgg", "PurchaseEgg", "EggShop", "BuyItem", "PurchaseItem"}
-                                for _, name in ipairs(candidates) do
-                                    local rem = rs:FindFirstChild(name)
-                                    if rem and rem:IsA("RemoteEvent") then
-                                        pcall(function() rem:FireServer() end)
-                                        success = true
-                                        break
-                                    elseif rem and rem:IsA("RemoteFunction") then
-                                        pcall(function() rem:InvokeServer() end)
-                                        success = true
-                                        break
-                                    end
-                                end
-                            end
-
-                            -- 2) Try workspace ProximityPrompts that mention "egg" or "shop"
-                            if not success then
-                                for _, obj in ipairs(workspace:GetDescendants()) do
-                                    if obj:IsA("ProximityPrompt") then
-                                        local name = (obj.Name or ""):lower()
-                                        local parentName = (obj.Parent and obj.Parent.Name or ""):lower()
-                                        if name:find("egg") or parentName:find("egg") or name:find("shop") or parentName:find("shop") then
-                                            tryFireProximityPrompt(obj)
-                                            success = true
-                                            break
-                                        end
-                                    end
-                                end
-                            end
-
-                            -- 3) Try to find a ClickDetector with "egg" in parent name
-                            if not success then
-                                for _, obj in ipairs(workspace:GetDescendants()) do
-                                    if obj:IsA("ClickDetector") then
-                                        local pname = (obj.Parent and obj.Parent.Name or ""):lower()
-                                        if pname:find("egg") or pname:find("shop") then
-                                            pcall(function() obj:FireAllClients() end)
-                                            success = true
-                                            break
-                                        end
-                                    end
-                                end
-                            end
-                        end)
-
-                        -- Wait a short interval before trying again
+                        local ok, res = pcall(attemptAutoBuy)
+                        -- res true if a purchase attempt was made (no guarantee of success)
+                        -- keep loop gentle to avoid spamming; adjust wait as needed
                         wait(1)
                     end
                 end)
@@ -183,4 +306,3 @@ end
 
 -- Load (or create) configuration so Rayfield can restore UI state if needed
 pcall(function() Rayfield:LoadConfiguration() end)
-
