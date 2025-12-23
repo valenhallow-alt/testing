@@ -13,15 +13,31 @@ local Rayfield = loadstring(game:HttpGet('https://raw.githubusercontent.com/UnHu
 _G.RayfieldInstance = Rayfield
 
 local Window = Rayfield:CreateWindow({
-    Name = "UnHub (Debug)",
-    FileName = "UnHub_Debug",
+    Name = "UnHub (Egg Buyer)",
+    FileName = "UnHub_EggBuyer",
     Icon = 0,
     Theme = "DarkBlue",
     ToggleUIKeybind = "H",
-    ConfigurationSaving = { Enabled = true, FolderName = nil, FileName = "UnHub_Debug" },
-    Discord = { Enabled = false, Invite = "", RememberJoins = true },
+    ConfigurationSaving = {
+        Enabled = true,
+        FolderName = nil,
+        FileName = "UnHub_EggBuyer"
+    },
+    Discord = {
+        Enabled = false,
+        Invite = "",
+        RememberJoins = true
+    },
     KeySystem = false,
-    KeySettings = { Title = "UnHub", Subtitle = "Key", Note = "", FileName = "Key", SaveKey = false, GrabKeyFromSite = false, Key = {} }
+    KeySettings = {
+        Title = "UnHub",
+        Subtitle = "Key",
+        Note = "",
+        FileName = "Key",
+        SaveKey = false,
+        GrabKeyFromSite = false,
+        Key = {}
+    }
 })
 
 -- Minimal UI toggle button (draggable) to show/hide Rayfield
@@ -32,16 +48,20 @@ do
 
     ST.Name = "Toggle UnHub"
     local parentGui = nil
-    pcall(function() parentGui = Rayfield:GetParent() and Rayfield:GetParent().Parent end)
-    if not parentGui or not parentGui:IsA("Instance") then parentGui = game:GetService("CoreGui") end
+    pcall(function()
+        parentGui = Rayfield:GetParent() and Rayfield:GetParent().Parent
+    end)
+    if not parentGui or not parentGui:IsA("Instance") then
+        parentGui = game:GetService("CoreGui")
+    end
     ST.Parent = parentGui
     ST.ResetOnSpawn = false
 
     T.Name = "UnHubToggle"
     T.Parent = ST
-    T.BackgroundColor3 = Color3.fromRGB(0,0,0)
-    T.Position = UDim2.new(0,30,0.08,0)
-    T.Size = UDim2.new(0,50,0,50)
+    T.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    T.Position = UDim2.new(0, 30, 0.08, 0)
+    T.Size = UDim2.new(0, 50, 0, 50)
     T.Image = "rbxassetid://112045743772867"
     T.Active = true
     T.Draggable = true
@@ -49,58 +69,61 @@ do
 
     Corner.Name = "Corner"
     Corner.Parent = T
-    Corner.CornerRadius = UDim.new(0,8)
+    Corner.CornerRadius = UDim.new(0, 8)
 
     T.MouseButton1Click:Connect(function()
         local ok, enabled = pcall(function() return Rayfield:GetEnable() end)
-        if ok then pcall(function() Rayfield:SetEnable(not enabled) end) end
+        if ok then
+            pcall(function() Rayfield:SetEnable(not enabled) end)
+        end
     end)
 end
 
--- === Main tab with improved debug detection ===
+-- === Main tab with targeted detection and debug UI ===
 do
     local MainTab = Window:CreateTab("Main", 4483362458)
     local MainSection = MainTab:CreateSection("Main")
 
+    -- Status label in UI
     local StatusLabel = MainTab:CreateLabel("Status: Idle", 4483362458, Color3.fromRGB(255,255,255), false)
-    local function setStatus(txt)
-        pcall(function() StatusLabel:Set("Status: " .. tostring(txt)) end)
-        print("[UnHub] " .. tostring(txt))
+    local function setStatus(text)
+        pcall(function() StatusLabel:Set("Status: " .. tostring(text)) end)
+        print("[UnHub] " .. tostring(text))
     end
 
-    local ReplicatedStorage = game:GetService("ReplicatedStorage")
-    local Players = game:GetService("Players")
-    local LocalPlayer = Players.LocalPlayer
-
-    local LastEgg = nil
-    local purchaseRemote = nil
-    local Conduit = nil
-    local loopRunning = false
-    _G.UnHub_AutoBuyEgg = _G.UnHub_AutoBuyEgg or false
-
-    -- Utility: shallow dump of a table's keys (for payload inspection)
+    -- Debug utilities
     local function dumpTableKeys(t)
         if type(t) ~= "table" then return tostring(t) end
-        local out = {}
-        for k,_ in pairs(t) do table.insert(out, tostring(k)) end
-        table.sort(out)
-        return table.concat(out, ", ")
+        local keys = {}
+        for k,_ in pairs(t) do table.insert(keys, tostring(k)) end
+        table.sort(keys)
+        return table.concat(keys, ", ")
     end
 
-    -- Utility: print instance structure (limited depth)
     local function dumpInstance(inst, depth, maxDepth)
         depth = depth or 0
         maxDepth = maxDepth or 2
-        if not inst or not inst:IsA("Instance") then return end
+        if not inst or not inst:IsA then return end
         local indent = string.rep("  ", depth)
-        print(string.format("%s- %s (%s)", indent, inst.Name or "<no name>", inst.ClassName))
+        print(string.format("%s- %s (%s)", indent, tostring(inst.Name or "<no name>"), tostring(inst.ClassName or "Instance")))
         if depth >= maxDepth then return end
         for _, child in ipairs(inst:GetChildren()) do
             dumpInstance(child, depth + 1, maxDepth)
         end
     end
 
-    -- Locate purchase remote
+    -- Internal state
+    local ReplicatedStorage = game:GetService("ReplicatedStorage")
+    local Players = game:GetService("Players")
+    local LocalPlayer = Players.LocalPlayer
+    _G.UnHub_AutoBuyEgg = _G.UnHub_AutoBuyEgg or false
+
+    local LastEgg = nil -- { id=..., rarity=..., variety=..., source=... }
+    local purchaseRemote = nil
+    local Conduit = nil
+    local loopRunning = false
+
+    -- Locate purchase remote at the path provided
     local function getPurchaseRemote()
         local ok, inst = pcall(function()
             return ReplicatedStorage
@@ -111,11 +134,17 @@ do
                 :WaitForChild("Instances", 2)
         end)
         if not ok or not inst then
+            warn("[UnHub] getPurchaseRemote: couldn't find Conduit Instances path")
             setStatus("Remote path missing")
             return nil
         end
         local rem = inst:FindFirstChild("_purchaseEgg")
-        if rem then setStatus("Found _purchaseEgg remote") else setStatus("_purchaseEgg not found") end
+        if rem then
+            setStatus("Found _purchaseEgg remote")
+        else
+            setStatus("_purchaseEgg not found")
+            warn("[UnHub] getPurchaseRemote: _purchaseEgg remote not found in Instances")
+        end
         return rem
     end
 
@@ -126,11 +155,9 @@ do
             Conduit = skeleton.Conduit
             setStatus("Conduit found; attaching debug listeners")
             Conduit.Listen("_requestEgg", function(payload)
-                -- Dump payload type and keys
                 setStatus("_requestEgg received; payload type: " .. typeof(payload))
                 if type(payload) == "table" then
                     print("[UnHub] _requestEgg payload keys: " .. dumpTableKeys(payload))
-                    -- if payload has nested data, print its keys too
                     if type(payload.data) == "table" then
                         print("[UnHub] _requestEgg.payload.data keys: " .. dumpTableKeys(payload.data))
                     else
@@ -139,10 +166,10 @@ do
                 else
                     print("[UnHub] _requestEgg payload raw: " .. tostring(payload))
                 end
-                -- try to salvage any fields if present
+                -- best-effort capture if payload contains expected fields
                 if type(payload) == "table" and payload.data then
                     LastEgg = {
-                        id = tostring(payload.data.id or payload.id or payload.dataId or payload.data.id or ""),
+                        id = tostring(payload.data.id or payload.id or payload.entity_id or payload.entity or ""),
                         rarity = tostring(payload.data.rarity or payload.rarity or "Basic"),
                         variety = tostring(payload.data.variety or payload.variety or "Normal"),
                         source = "Conduit"
@@ -167,7 +194,7 @@ do
                 end
                 if type(payload) == "table" and payload.data then
                     LastEgg = {
-                        id = tostring(payload.data.id or payload.id or payload.dataId or payload.data.id or ""),
+                        id = tostring(payload.data.id or payload.id or payload.entity_id or payload.entity or ""),
                         rarity = tostring(payload.data.rarity or payload.rarity or "Basic"),
                         variety = tostring(payload.data.variety or payload.variety or "Normal"),
                         source = "Conduit"
@@ -179,17 +206,45 @@ do
                 end
             end)
         else
-            setStatus("Conduit not available; will use workspace scan")
+            setStatus("Conduit not available; using workspace scan")
+            warn("[UnHub] Skeleton.Conduit not available or doesn't expose Listen; falling back to workspace scan")
         end
     end)
 
-    -- Improved targeted scan:
-    -- For each top-level child of workspace, check:
-    --  - child:FindFirstChild("Eggtag")
-    --  - any child that is a BillboardGui (name contains "Eggtag" or not)
-    -- If found, print a structure dump and attempt to extract Entity data.
+    -- Extractor that reads TextLabel.Text values (Entity, Rarity, Variety, Price)
     local function extractFromEntity(entityInst)
         if not entityInst or not entityInst:IsA("Instance") then return nil end
+
+        -- If entity is a TextLabel/TextButton/TextBox, read its Text and siblings under same parent (Container)
+        if entityInst:IsA("TextLabel") or entityInst:IsA("TextButton") or entityInst:IsA("TextBox") then
+            local entText = tostring(entityInst.Text or "")
+            -- Try to parse an id token from the text (e.g., "entity_Piccolo_egg" or "Piccolo")
+            local id = entText:match("([%w_%-]+_egg)") or entText:match("([%w_%-]+)")
+            local container = entityInst.Parent
+            local rarity, variety, price = nil, nil, nil
+            if container then
+                local r = container:FindFirstChild("Rarity")
+                local v = container:FindFirstChild("Variety")
+                local p = container:FindFirstChild("Price")
+                if r and (r:IsA("TextLabel") or r:IsA("TextButton") or r:IsA("TextBox")) then rarity = tostring(r.Text or "") end
+                if v and (v:IsA("TextLabel") or v:IsA("TextButton") or v:IsA("TextBox")) then variety = tostring(v.Text or "") end
+                if p and (p:IsA("TextLabel") or p:IsA("TextButton") or p:IsA("TextBox")) then price = tostring(p.Text or "") end
+            end
+            local function trim(s) return (tostring(s):gsub("^%s*(.-)%s*$", "%1")) end
+            id = id and trim(id) or nil
+            rarity = rarity and trim(rarity) or nil
+            variety = variety and trim(variety) or nil
+
+            if id and rarity and variety then
+                return { id = id, rarity = rarity, variety = variety }
+            end
+            if id or rarity or variety then
+                return { id = id or "", rarity = rarity or "Basic", variety = variety or "Normal" }
+            end
+            return nil
+        end
+
+        -- Fallback: try attributes and ValueBase children
         local function tryAttr(n)
             local ok, v = pcall(function() return entityInst:GetAttribute(n) end)
             if ok and v ~= nil then return tostring(v) end
@@ -203,31 +258,32 @@ do
             end
             return nil
         end
-        local id = tryAttr("id") or tryChildValue("id") or tryChildValue("Id") or tryChildValue("Name")
-        local rarity = tryAttr("rarity") or tryChildValue("rarity") or tryChildValue("Rarity")
-        local variety = tryAttr("variety") or tryChildValue("variety") or tryChildValue("Variety")
-        if id and rarity and variety then return { id = id, rarity = rarity, variety = variety } end
+
+        local id = tryAttr("id") or tryChildValue("id") or tryChildValue("Name")
+        local rarity = tryAttr("rarity") or tryChildValue("rarity")
+        local variety = tryAttr("variety") or tryChildValue("variety")
+        if id and rarity and variety then
+            return { id = tostring(id), rarity = tostring(rarity), variety = tostring(variety) }
+        end
         return nil
     end
 
+    -- Targeted workspace scan: check top-level children for Eggtag or BillboardGui-like objects
     local function targetedWorkspaceScan()
         setStatus("Scanning workspace children for Eggtag-like GUIs")
         local foundAny = false
         for _, child in ipairs(workspace:GetChildren()) do
-            -- quick skip for players folder etc
-            if child:IsA("Model") or child:IsA("Folder") or child:IsA("BasePart") or child:IsA("Folder") then
-                -- direct Eggtag child?
+            if child:IsA("Model") or child:IsA("Folder") or child:IsA("BasePart") then
                 local eggtag = child:FindFirstChild("Eggtag")
-                if eggtag then
+                if eggtag and eggtag:IsA("BillboardGui") then
                     foundAny = true
                     print(string.format("[UnHub] Found Eggtag at workspace.%s.Eggtag", child.Name))
                     dumpInstance(eggtag, 0, 3)
-                    -- try Container.Entity
-                    local container = eggtag:FindFirstChild("Container") or eggtag:FindFirstChildWhichIsA("Folder") or eggtag:FindFirstChildWhichIsA("Frame")
+                    local container = eggtag:FindFirstChild("Container") or eggtag:FindFirstChildWhichIsA("Frame") or eggtag:FindFirstChildWhichIsA("Folder")
                     if container then
-                        local entity = container:FindFirstChild("Entity") or container:FindFirstChildWhichIsA("Model") or container:FindFirstChildWhichIsA("Folder")
+                        local entity = container:FindFirstChild("Entity") or container:FindFirstChildWhichIsA("TextLabel") or container:FindFirstChildWhichIsA("Model")
                         if entity then
-                            print("[UnHub] Dumping Entity children:")
+                            print("[UnHub] Dumping Entity children for debugging:")
                             dumpInstance(entity, 0, 3)
                             local data = extractFromEntity(entity)
                             if data then
@@ -245,15 +301,15 @@ do
                         setStatus("Eggtag found but no Container child; see console")
                     end
                 else
-                    -- not direct Eggtag; check for any BillboardGui under this child (name may vary)
+                    -- fallback: check for any BillboardGui or child with "egg" in name
                     for _, c2 in ipairs(child:GetChildren()) do
-                        if c2:IsA("BillboardGui") or (string.lower(c2.Name):find("eggtag") or string.lower(c2.Name):find("egg")) then
+                        if c2:IsA("BillboardGui") or string.find(string.lower(c2.Name), "egg") then
                             foundAny = true
                             print(string.format("[UnHub] Found BillboardGui-like at workspace.%s.%s", child.Name, c2.Name))
                             dumpInstance(c2, 0, 3)
-                            local container = c2:FindFirstChild("Container") or c2:FindFirstChildWhichIsA("Folder") or c2:FindFirstChildWhichIsA("Frame")
+                            local container = c2:FindFirstChild("Container") or c2:FindFirstChildWhichIsA("Frame") or c2:FindFirstChildWhichIsA("Folder")
                             if container then
-                                local entity = container:FindFirstChild("Entity") or container:FindFirstChildWhichIsA("Model") or container:FindFirstChildWhichIsA("Folder")
+                                local entity = container:FindFirstChild("Entity") or container:FindFirstChildWhichIsA("TextLabel") or container:FindFirstChildWhichIsA("Model")
                                 if entity then
                                     print("[UnHub] Dumping Entity children:")
                                     dumpInstance(entity, 0, 3)
@@ -285,35 +341,64 @@ do
         return false
     end
 
-    -- Build args and safe fire (unchanged)
+    -- Build args and safe fire
     local function buildArgs(egg)
         if not egg then return nil end
-        return { { __raw = true, data = { id = egg.id, rarity = egg.rarity, variety = egg.variety } } }
+        return {
+            {
+                __raw = true,
+                data = {
+                    id = egg.id,
+                    rarity = egg.rarity,
+                    variety = egg.variety
+                }
+            }
+        }
     end
 
     local lastFire = 0
     local FIRE_COOLDOWN = 1.5
     local function safeFirePurchase()
         if not purchaseRemote then purchaseRemote = getPurchaseRemote() end
-        if not purchaseRemote then setStatus("Purchase remote missing"); return false end
-        if not LastEgg then setStatus("No egg data to purchase"); return false end
-        if tick() - lastFire < FIRE_COOLDOWN then setStatus("Cooldown active"); return false end
+        if not purchaseRemote then
+            setStatus("Purchase remote missing")
+            return false
+        end
+        if not LastEgg then
+            setStatus("No egg data to purchase")
+            return false
+        end
+        if tick() - lastFire < FIRE_COOLDOWN then
+            setStatus("Cooldown active, skipping fire")
+            return false
+        end
         lastFire = tick()
         local args = buildArgs(LastEgg)
-        if not args then setStatus("Failed to build args"); return false end
+        if not args then
+            setStatus("Failed to build args")
+            return false
+        end
         local ok, err = pcall(function() purchaseRemote:FireServer(unpack(args)) end)
-        if ok then setStatus(string.format("Fired purchase for id=%s (source=%s)", LastEgg.id, tostring(LastEgg.source))) else setStatus("FireServer failed; see console") end
+        if ok then
+            setStatus(string.format("Fired purchase for id=%s rarity=%s variety=%s (source=%s)", LastEgg.id, LastEgg.rarity, LastEgg.variety, tostring(LastEgg.source)))
+            print(string.format("[UnHub] Fired purchase for id=%s rarity=%s variety=%s (source=%s)", LastEgg.id, LastEgg.rarity, LastEgg.variety, tostring(LastEgg.source)))
+        else
+            setStatus("FireServer failed; see console")
+            warn("[UnHub] safeFirePurchase error:", err)
+        end
         return ok
     end
 
-    -- Loop runner (keeps lightweight)
+    -- Loop runner
     local function startAutoBuyLoop()
-        if loopRunning then return end
+        if loopRunning then
+            print("[UnHub] startAutoBuyLoop: loop already running")
+            return
+        end
         loopRunning = true
         setStatus("AutoBuy loop starting")
         spawn(function()
             while _G.UnHub_AutoBuyEgg do
-                -- prefer Conduit-captured data
                 if LastEgg and LastEgg.source == "Conduit" then
                     pcall(safeFirePurchase)
                     task.wait(1.5)
@@ -328,8 +413,8 @@ do
         end)
     end
 
-    -- UI controls: toggle and manual scan button
-    local AutoBuyToggle = MainTab:CreateToggle({
+    -- UI controls: toggle, manual scan, and workspace dump
+    MainTab:CreateToggle({
         Name = "Auto Buy Egg",
         CurrentValue = false,
         Flag = "AutoBuyEgg",
@@ -366,8 +451,7 @@ do
             setStatus("Dumped workspace top-level names to console")
         end
     })
-
 end
 
--- Load configuration
+-- Load (or create) configuration so Rayfield can restore UI state if needed
 pcall(function() Rayfield:LoadConfiguration() end)
