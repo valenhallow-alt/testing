@@ -109,8 +109,17 @@ do
                 :WaitForChild("Conduit", 2)
                 :WaitForChild("Instances", 2)
         end)
-        if not ok or not inst then return nil end
-        return inst:FindFirstChild("_purchaseEgg")
+        if not ok or not inst then
+            warn("[UnHub] getPurchaseRemote: couldn't find Conduit Instances path")
+            return nil
+        end
+        local rem = inst:FindFirstChild("_purchaseEgg")
+        if rem then
+            print("[UnHub] getPurchaseRemote: found _purchaseEgg remote")
+        else
+            warn("[UnHub] getPurchaseRemote: _purchaseEgg remote not found in Instances")
+        end
+        return rem
     end
 
     -- Attempt to require the Skeleton module and attach Conduit listeners (lightweight)
@@ -120,6 +129,7 @@ do
         end)
         if ok and skeleton and skeleton.Conduit and type(skeleton.Conduit.Listen) == "function" then
             Conduit = skeleton.Conduit
+            print("[UnHub] Conduit found, attaching listeners for _requestEgg and _purchaseEgg")
             -- Listen for events that commonly carry egg info; adjust names if needed
             Conduit.Listen("_requestEgg", function(payload)
                 if type(payload) == "table" and payload.data then
@@ -128,6 +138,9 @@ do
                         rarity = tostring(payload.data.rarity or payload.rarity or "Basic"),
                         variety = tostring(payload.data.variety or payload.variety or "Normal")
                     }
+                    print(string.format("[UnHub] Conduit _requestEgg -> captured egg: id=%s rarity=%s variety=%s", LastEgg.id, LastEgg.rarity, LastEgg.variety))
+                else
+                    print("[UnHub] Conduit _requestEgg -> payload missing data or not table")
                 end
             end)
             Conduit.Listen("_purchaseEgg", function(payload)
@@ -137,8 +150,13 @@ do
                         rarity = tostring(payload.data.rarity or payload.rarity or "Basic"),
                         variety = tostring(payload.data.variety or payload.variety or "Normal")
                     }
+                    print(string.format("[UnHub] Conduit _purchaseEgg -> captured egg: id=%s rarity=%s variety=%s", LastEgg.id, LastEgg.rarity, LastEgg.variety))
+                else
+                    print("[UnHub] Conduit _purchaseEgg -> payload missing data or not table")
                 end
             end)
+        else
+            warn("[UnHub] Skeleton.Conduit not available or doesn't expose Listen; falling back to conservative scanning")
         end
     end)
 
@@ -161,6 +179,7 @@ do
                     local jVariety = txt:match('"variety"%s*:%s*"(.-)"') or txt:match("'variety'%s*:%s*'(.-)'")
                     if jId and jRarity and jVariety then
                         LastEgg = { id = jId, rarity = jRarity, variety = jVariety }
+                        print(string.format("[UnHub] conservativeScanForEgg: found via data child -> id=%s rarity=%s variety=%s", LastEgg.id, LastEgg.rarity, LastEgg.variety))
                         return
                     end
                 end
@@ -171,11 +190,13 @@ do
                     local okV, vAttr = pcall(function() return obj:GetAttribute("variety") end)
                     if okR and okV and rAttr and vAttr then
                         LastEgg = { id = tostring(idAttr), rarity = tostring(rAttr), variety = tostring(vAttr) }
+                        print(string.format("[UnHub] conservativeScanForEgg: found via attributes -> id=%s rarity=%s variety=%s", LastEgg.id, LastEgg.rarity, LastEgg.variety))
                         return
                     end
                 end
             end
         end
+        print("[UnHub] conservativeScanForEgg: no egg data found in scanned roots")
     end
 
     -- Build args table in the exact shape required by the remote
@@ -197,26 +218,52 @@ do
     local lastFire = 0
     local FIRE_COOLDOWN = 1.5
     local function safeFirePurchase()
-        if not purchaseRemote then purchaseRemote = getPurchaseRemote() end
-        if not purchaseRemote then return false end
-        if not LastEgg then return false end
-        if tick() - lastFire < FIRE_COOLDOWN then return false end
+        if not purchaseRemote then
+            purchaseRemote = getPurchaseRemote()
+            if not purchaseRemote then
+                warn("[UnHub] safeFirePurchase: purchaseRemote not available")
+                return false
+            end
+        end
+        if not LastEgg then
+            warn("[UnHub] safeFirePurchase: no LastEgg data to purchase")
+            return false
+        end
+        if tick() - lastFire < FIRE_COOLDOWN then
+            print("[UnHub] safeFirePurchase: cooldown active, skipping fire")
+            return false
+        end
         lastFire = tick()
         local args = buildArgs(LastEgg)
-        if not args then return false end
-        pcall(function() purchaseRemote:FireServer(unpack(args)) end)
-        return true
+        if not args then
+            warn("[UnHub] safeFirePurchase: failed to build args")
+            return false
+        end
+        local ok, err = pcall(function() purchaseRemote:FireServer(unpack(args)) end)
+        if ok then
+            print(string.format("[UnHub] safeFirePurchase: fired purchase for id=%s rarity=%s variety=%s", LastEgg.id, LastEgg.rarity, LastEgg.variety))
+        else
+            warn("[UnHub] safeFirePurchase: FireServer failed:", err)
+        end
+        return ok
     end
 
     -- Single background loop that reacts to toggle state; prevents multiple loops
     local function startAutoBuyLoop()
-        if loopRunning then return end
+        if loopRunning then
+            print("[UnHub] startAutoBuyLoop: loop already running")
+            return
+        end
         loopRunning = true
+        print("[UnHub] startAutoBuyLoop: starting loop")
         spawn(function()
             while _G.UnHub_AutoBuyEgg do
                 -- prefer event-driven data
                 if LastEgg then
-                    pcall(safeFirePurchase)
+                    local ok, err = pcall(safeFirePurchase)
+                    if not ok then
+                        warn("[UnHub] startAutoBuyLoop: safeFirePurchase pcall error:", err)
+                    end
                     task.wait(1.5)
                 else
                     -- conservative scan at low frequency
@@ -228,6 +275,7 @@ do
                 end
             end
             loopRunning = false
+            print("[UnHub] startAutoBuyLoop: loop stopped (toggle disabled)")
         end)
     end
 
@@ -239,11 +287,13 @@ do
         Callback = function(Value)
             _G.UnHub_AutoBuyEgg = Value
             if Value then
+                print("[UnHub] Toggle enabled: Auto Buy Egg ON")
                 -- refresh remote reference
                 purchaseRemote = getPurchaseRemote()
                 -- start the safe loop
                 startAutoBuyLoop()
             else
+                print("[UnHub] Toggle disabled: Auto Buy Egg OFF")
                 -- disabling will cause the loop to exit naturally
             end
         end,
