@@ -82,5 +82,105 @@ do
     end)
 end
 
+-- === Added: Main tab with Auto Buy Egg toggle ===
+do
+    -- Create "Main" tab (use an icon id or 0 for none)
+    local MainTab = Window:CreateTab("Main", 4483362458)
+    local MainSection = MainTab:CreateSection("Main")
+
+    -- Global flag used by the toggle loop
+    _G.UnHub_AutoBuyEgg = _G.UnHub_AutoBuyEgg or false
+
+    -- Helper: safe proximity prompt fire (works in many exploit environments)
+    local function tryFireProximityPrompt(prompt)
+        local ok, err = pcall(function()
+            if typeof(fireproximityprompt) == "function" then
+                fireproximityprompt(prompt)
+            elseif prompt:IsA("ProximityPrompt") and prompt.Parent and prompt.Parent:FindFirstChildOfClass("ClickDetector") then
+                -- fallback attempt: click detector (not guaranteed)
+                local cd = prompt.Parent:FindFirstChildOfClass("ClickDetector")
+                if cd and typeof(cd.MouseClick) == "RBXScriptSignal" then
+                    cd:FireAllClients()
+                end
+            end
+        end)
+        return ok
+    end
+
+    -- Create the Auto Buy Egg toggle
+    local AutoBuyToggle = MainTab:CreateToggle({
+        Name = "Auto Buy Egg",
+        CurrentValue = false,
+        Flag = "AutoBuyEgg",
+        Callback = function(Value)
+            _G.UnHub_AutoBuyEgg = Value
+
+            if Value then
+                -- Start a loop that attempts to buy eggs while enabled
+                spawn(function()
+                    while _G.UnHub_AutoBuyEgg do
+                        pcall(function()
+                            -- Example strategies (attempt common remote names, then proximity prompts)
+                            local success = false
+
+                            -- 1) Try common RemoteEvent/RemoteFunction names in ReplicatedStorage
+                            local rs = game:GetService("ReplicatedStorage")
+                            if rs then
+                                local candidates = {"BuyEgg", "PurchaseEgg", "EggShop", "BuyItem", "PurchaseItem"}
+                                for _, name in ipairs(candidates) do
+                                    local rem = rs:FindFirstChild(name)
+                                    if rem and rem:IsA("RemoteEvent") then
+                                        pcall(function() rem:FireServer() end)
+                                        success = true
+                                        break
+                                    elseif rem and rem:IsA("RemoteFunction") then
+                                        pcall(function() rem:InvokeServer() end)
+                                        success = true
+                                        break
+                                    end
+                                end
+                            end
+
+                            -- 2) Try workspace ProximityPrompts that mention "egg" or "shop"
+                            if not success then
+                                for _, obj in ipairs(workspace:GetDescendants()) do
+                                    if obj:IsA("ProximityPrompt") then
+                                        local name = (obj.Name or ""):lower()
+                                        local parentName = (obj.Parent and obj.Parent.Name or ""):lower()
+                                        if name:find("egg") or parentName:find("egg") or name:find("shop") or parentName:find("shop") then
+                                            tryFireProximityPrompt(obj)
+                                            success = true
+                                            break
+                                        end
+                                    end
+                                end
+                            end
+
+                            -- 3) Try to find a ClickDetector with "egg" in parent name
+                            if not success then
+                                for _, obj in ipairs(workspace:GetDescendants()) do
+                                    if obj:IsA("ClickDetector") then
+                                        local pname = (obj.Parent and obj.Parent.Name or ""):lower()
+                                        if pname:find("egg") or pname:find("shop") then
+                                            pcall(function() obj:FireAllClients() end)
+                                            success = true
+                                            break
+                                        end
+                                    end
+                                end
+                            end
+                        end)
+
+                        -- Wait a short interval before trying again
+                        wait(1)
+                    end
+                end)
+            end
+        end,
+    })
+end
+-- === End added Main tab ===
+
 -- Load (or create) configuration so Rayfield can restore UI state if needed
 pcall(function() Rayfield:LoadConfiguration() end)
+
