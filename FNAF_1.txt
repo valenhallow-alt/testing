@@ -82,7 +82,7 @@ do
     end)
 end
 
--- === Added: Main tab with Auto Buy Egg toggle (with dynamic detection & purchase) ===
+-- === Main tab with safe Auto Buy Egg toggle (event-driven + conservative fallback) ===
 do
     local MainTab = Window:CreateTab("Main", 4483362458)
     local MainSection = MainTab:CreateSection("Main")
@@ -90,195 +90,145 @@ do
     -- Global flag used by the toggle loop
     _G.UnHub_AutoBuyEgg = _G.UnHub_AutoBuyEgg or false
 
-    -- Helper: locate the purchase remote at the exact path provided
+    -- Internal state
+    local ReplicatedStorage = game:GetService("ReplicatedStorage")
+    local Players = game:GetService("Players")
+    local LocalPlayer = Players.LocalPlayer
+    local LastEgg = nil -- { id=..., rarity=..., variety=... }
+    local purchaseRemote = nil
+    local Conduit = nil
+    local loopRunning = false
+
+    -- Locate the purchase remote at the path you provided
     local function getPurchaseRemote()
-        local ok, conduitInstances = pcall(function()
-            return game:GetService("ReplicatedStorage")
+        local ok, inst = pcall(function()
+            return ReplicatedStorage
                 :WaitForChild("Modules", 2)
                 :WaitForChild("Internals", 2)
                 :WaitForChild("Skeleton", 2)
                 :WaitForChild("Conduit", 2)
                 :WaitForChild("Instances", 2)
         end)
-        if not ok or not conduitInstances then return nil end
-        local rem = conduitInstances:FindFirstChild("_purchaseEgg")
-        return rem
+        if not ok or not inst then return nil end
+        return inst:FindFirstChild("_purchaseEgg")
     end
 
-    -- Helper: try to extract fields from an Instance using multiple heuristics
-    local function extractEggDataFromInstance(inst)
-        if not inst or not inst:IsA("Instance") then return nil end
-
-        local function tryAttr(name)
-            local ok, v = pcall(function() return inst:GetAttribute(name) end)
-            if ok and v ~= nil then return tostring(v) end
-            return nil
-        end
-
-        local function tryChildValue(name)
-            -- direct child with ValueBase
-            local c = inst:FindFirstChild(name)
-            if c and c:IsA("ValueBase") then
-                return tostring(c.Value)
-            end
-            -- case-insensitive search among children
-            for _, child in ipairs(inst:GetChildren()) do
-                if child:IsA("ValueBase") and string.lower(child.Name) == string.lower(name) then
-                    return tostring(child.Value)
+    -- Attempt to require the Skeleton module and attach Conduit listeners (lightweight)
+    pcall(function()
+        local ok, skeleton = pcall(function()
+            return require(ReplicatedStorage.Modules.Internals.Skeleton)
+        end)
+        if ok and skeleton and skeleton.Conduit and type(skeleton.Conduit.Listen) == "function" then
+            Conduit = skeleton.Conduit
+            -- Listen for events that commonly carry egg info; adjust names if needed
+            Conduit.Listen("_requestEgg", function(payload)
+                if type(payload) == "table" and payload.data then
+                    LastEgg = {
+                        id = tostring(payload.data.id or payload.id or payload.dataId or payload.data.id),
+                        rarity = tostring(payload.data.rarity or payload.rarity or "Basic"),
+                        variety = tostring(payload.data.variety or payload.variety or "Normal")
+                    }
                 end
-            end
-            return nil
+            end)
+            Conduit.Listen("_purchaseEgg", function(payload)
+                if type(payload) == "table" and payload.data then
+                    LastEgg = {
+                        id = tostring(payload.data.id or payload.id or payload.dataId or payload.data.id),
+                        rarity = tostring(payload.data.rarity or payload.rarity or "Basic"),
+                        variety = tostring(payload.data.variety or payload.variety or "Normal")
+                    }
+                end
+            end)
         end
+    end)
 
-        local function tryGuiTextSearch(root)
-            for _, d in ipairs(root:GetDescendants()) do
-                if d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox") then
-                    local txt = tostring(d.Text or "")
-                    -- patterns like "id: entity_Piccolo_egg" or "rarity: Basic"
-                    local id = txt:match("id[:%s]*([%w_%-%:]+)")
-                    local rarity = txt:match("rarity[:%s]*([%w_%-%:]+)")
-                    local variety = txt:match("variety[:%s]*([%w_%-%:]+)")
-                    if id or rarity or variety then
-                        return id, rarity, variety
+    -- Conservative scanner: narrow, low-frequency search for egg info (safe)
+    local function conservativeScanForEgg()
+        local roots = {}
+        if workspace:FindFirstChild("Plots") then table.insert(roots, workspace.Plots) end
+        if workspace:FindFirstChild("Shop") then table.insert(roots, workspace.Shop) end
+        if workspace:FindFirstChild("EggShop") then table.insert(roots, workspace.EggShop) end
+        if #roots == 0 then table.insert(roots, workspace) end
+
+        for _, root in ipairs(roots) do
+            for _, obj in ipairs(root:GetChildren()) do
+                -- quick checks only on direct children to avoid deep GetDescendants
+                local dataChild = obj:FindFirstChild("data")
+                if dataChild and dataChild:IsA("StringValue") then
+                    local txt = dataChild.Value or ""
+                    local jId = txt:match('"id"%s*:%s*"(.-)"') or txt:match("'id'%s*:%s*'(.-)'")
+                    local jRarity = txt:match('"rarity"%s*:%s*"(.-)"') or txt:match("'rarity'%s*:%s*'(.-)'")
+                    local jVariety = txt:match('"variety"%s*:%s*"(.-)"') or txt:match("'variety'%s*:%s*'(.-)'")
+                    if jId and jRarity and jVariety then
+                        LastEgg = { id = jId, rarity = jRarity, variety = jVariety }
+                        return
                     end
                 end
-            end
-            return nil, nil, nil
-        end
-
-        -- 1) Attributes
-        local id = tryAttr("id") or tryAttr("Id") or tryAttr("egg_id") or tryAttr("eggId")
-        local rarity = tryAttr("rarity") or tryAttr("Rarity")
-        local variety = tryAttr("variety") or tryAttr("Variety")
-
-        -- 2) Child Value objects
-        id = id or tryChildValue("id") or tryChildValue("Id") or tryChildValue("egg_id") or tryChildValue("Name")
-        rarity = rarity or tryChildValue("rarity") or tryChildValue("Rarity")
-        variety = variety or tryChildValue("variety") or tryChildValue("Variety")
-
-        -- 3) GUI text (BillboardGui etc.)
-        if (not id or id == "") and inst:FindFirstChildOfClass("BillboardGui") then
-            local gId, gRarity, gVariety = tryGuiTextSearch(inst)
-            id = id or gId
-            rarity = rarity or gRarity
-            variety = variety or gVariety
-        end
-
-        -- 4) If instance has a child named "data" that is a table-like Value (StringValue with JSON-ish text)
-        local dataChild = inst:FindFirstChild("data")
-        if (not id or not rarity or not variety) and dataChild and dataChild:IsA("StringValue") then
-            local txt = dataChild.Value or ""
-            -- try to extract tokens from JSON-like string
-            local jId = txt:match('"id"%s*:%s*"(.-)"') or txt:match("'id'%s*:%s*'(.-)'")
-            local jRarity = txt:match('"rarity"%s*:%s*"(.-)"') or txt:match("'rarity'%s*:%s*'(.-)'")
-            local jVariety = txt:match('"variety"%s*:%s*"(.-)"') or txt:match("'variety'%s*:%s*'(.-)'")
-            id = id or jId
-            rarity = rarity or jRarity
-            variety = variety or jVariety
-        end
-
-        -- 5) Fallback to name parsing (last resort)
-        if not id or id == "" then
-            local n = inst.Name or ""
-            if n:lower():find("egg") then
-                local token = n:match("([%w_%-]+_egg)") or n:match("([%w_%-]+)")
-                if token then id = token end
-            end
-        end
-
-        if id and rarity and variety then
-            return {
-                id = tostring(id),
-                rarity = tostring(rarity),
-                variety = tostring(variety)
-            }
-        end
-
-        return nil
-    end
-
-    -- Heuristic: scan likely places for egg objects and return first match
-    local function findEggInWorld()
-        local candidates = { workspace }
-        if workspace:FindFirstChild("Plots") then table.insert(candidates, workspace.Plots) end
-        if workspace:FindFirstChild("Shop") then table.insert(candidates, workspace.Shop) end
-        if workspace:FindFirstChild("EggShop") then table.insert(candidates, workspace.EggShop) end
-
-        for _, root in ipairs(candidates) do
-            for _, obj in ipairs(root:GetDescendants()) do
-                local name = (obj.Name or ""):lower()
-                if name:find("egg") or name:find("conveyor") or name:find("shop") or obj:FindFirstChild("Essentials") or obj:FindFirstChild("ConveyorVisual") then
-                    local data = extractEggDataFromInstance(obj)
-                    if data then
-                        return data, obj
+                -- attributes check
+                local okId, idAttr = pcall(function() return obj:GetAttribute("id") end)
+                if okId and idAttr then
+                    local okR, rAttr = pcall(function() return obj:GetAttribute("rarity") end)
+                    local okV, vAttr = pcall(function() return obj:GetAttribute("variety") end)
+                    if okR and okV and rAttr and vAttr then
+                        LastEgg = { id = tostring(idAttr), rarity = tostring(rAttr), variety = tostring(vAttr) }
+                        return
                     end
                 end
             end
         end
-
-        -- final fallback: scan workspace for any instance with attributes that look like egg data
-        for _, obj in ipairs(workspace:GetDescendants()) do
-            local data = extractEggDataFromInstance(obj)
-            if data then return data, obj end
-        end
-
-        return nil, nil
     end
 
-    -- Build args table in the exact shape you provided
-    local function buildArgsTable(eggData)
-        if not eggData then return nil end
-        local args = {
+    -- Build args table in the exact shape required by the remote
+    local function buildArgs(egg)
+        if not egg then return nil end
+        return {
             {
                 __raw = true,
                 data = {
-                    id = eggData.id,
-                    rarity = eggData.rarity,
-                    variety = eggData.variety
+                    id = egg.id,
+                    rarity = egg.rarity,
+                    variety = egg.variety
                 }
             }
         }
-        return args
     end
 
-    -- Main attempt function used by the AutoBuy loop
-    local function attemptAutoBuy()
-        local purchaseRemote = getPurchaseRemote()
+    -- Debounced safe fire
+    local lastFire = 0
+    local FIRE_COOLDOWN = 1.5
+    local function safeFirePurchase()
+        if not purchaseRemote then purchaseRemote = getPurchaseRemote() end
         if not purchaseRemote then return false end
+        if not LastEgg then return false end
+        if tick() - lastFire < FIRE_COOLDOWN then return false end
+        lastFire = tick()
+        local args = buildArgs(LastEgg)
+        if not args then return false end
+        pcall(function() purchaseRemote:FireServer(unpack(args)) end)
+        return true
+    end
 
-        -- Try to find egg data in world
-        local eggData, eggInstance = findEggInWorld()
-
-        -- If not found in world, try PlayerGui text heuristics
-        if not eggData then
-            local player = game:GetService("Players").LocalPlayer
-            if player and player:FindFirstChild("PlayerGui") then
-                for _, gui in ipairs(player.PlayerGui:GetDescendants()) do
-                    if gui:IsA("TextLabel") or gui:IsA("TextButton") or gui:IsA("TextBox") then
-                        local txt = tostring(gui.Text or "")
-                        local id = txt:match("id[:%s]*([%w_%-%:]+)")
-                        local rarity = txt:match("rarity[:%s]*([%w_%-%:]+)")
-                        local variety = txt:match("variety[:%s]*([%w_%-%:]+)")
-                        if id and rarity and variety then
-                            eggData = { id = id, rarity = rarity, variety = variety }
-                            break
-                        end
+    -- Single background loop that reacts to toggle state; prevents multiple loops
+    local function startAutoBuyLoop()
+        if loopRunning then return end
+        loopRunning = true
+        spawn(function()
+            while _G.UnHub_AutoBuyEgg do
+                -- prefer event-driven data
+                if LastEgg then
+                    pcall(safeFirePurchase)
+                    task.wait(1.5)
+                else
+                    -- conservative scan at low frequency
+                    pcall(conservativeScanForEgg)
+                    if LastEgg then
+                        pcall(safeFirePurchase)
                     end
+                    task.wait(5)
                 end
             end
-        end
-
-        if eggData then
-            local args = buildArgsTable(eggData)
-            if args then
-                pcall(function()
-                    purchaseRemote:FireServer(unpack(args))
-                end)
-                return true
-            end
-        end
-
-        return false
+            loopRunning = false
+        end)
     end
 
     -- Create the Auto Buy Egg toggle
@@ -288,21 +238,18 @@ do
         Flag = "AutoBuyEgg",
         Callback = function(Value)
             _G.UnHub_AutoBuyEgg = Value
-
             if Value then
-                spawn(function()
-                    while _G.UnHub_AutoBuyEgg do
-                        local ok, res = pcall(attemptAutoBuy)
-                        -- res true if a purchase attempt was made (no guarantee of success)
-                        -- keep loop gentle to avoid spamming; adjust wait as needed
-                        wait(1)
-                    end
-                end)
+                -- refresh remote reference
+                purchaseRemote = getPurchaseRemote()
+                -- start the safe loop
+                startAutoBuyLoop()
+            else
+                -- disabling will cause the loop to exit naturally
             end
         end,
     })
 end
--- === End added Main tab ===
+-- === End Main tab ===
 
 -- Load (or create) configuration so Rayfield can restore UI state if needed
 pcall(function() Rayfield:LoadConfiguration() end)
