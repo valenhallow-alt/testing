@@ -8,7 +8,7 @@ if _G.RayfieldInstance then
     _G.RayfieldInstance = nil
 end
 
--- Load Rayfield library and create a window
+-- Load Rayfield library and create a minimal, blank window
 local Rayfield = loadstring(game:HttpGet('https://raw.githubusercontent.com/UnHub-LEGO/Scripts/refs/heads/main/Rayfield%20Library'))()
 _G.RayfieldInstance = Rayfield
 
@@ -71,590 +71,332 @@ do
     Corner.Parent = T
     Corner.CornerRadius = UDim.new(0, 8)
 
-    T.MouseButton1Click:Connect(function()
-        local ok, enabled = pcall(function() return Rayfield:GetEnable() end)
-        if ok then
-            pcall(function() Rayfield:SetEnable(not enabled) end)
-        end
-    end)
+    -- Removed toggle click behavior to avoid UI-driven enabling/disabling
 end
 
--- Load (or create) configuration so Rayfield can restore UI state if needed
 pcall(function() Rayfield:LoadConfiguration() end)
 
--- =========================
--- Egg Stats tab
--- =========================
+----------------------------------------------------------------
+-- Main tab with robust Auto Spin+Buy Egg
+----------------------------------------------------------------
 
-local EggTab = Window:CreateTab("Egg Stats", 4483362458)
-local EggSection = EggTab:CreateSection("Egg Information")
+local MainTab = Window:CreateTab("Main", 4483362458)
+local MainSection = MainTab:CreateSection("Auto Features")
 
-local ParentLabel = EggTab:CreateLabel("Parent: N/A", 4483362458, Color3.fromRGB(255,255,255), false)
-local PriceLabel = EggTab:CreateLabel("Price: N/A", 4483362458, Color3.fromRGB(255,255,255), false)
-local RarityLabel = EggTab:CreateLabel("Rarity: N/A", 4483362458, Color3.fromRGB(255,255,255), false)
-local VarietyLabel = EggTab:CreateLabel("Variety: N/A", 4483362458, Color3.fromRGB(255,255,255), false)
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
 
--- Helper: safely read a property from a container (handles Value objects, TextLabels, StringValues, etc.)
-local function readContainerField(container, fieldName)
-    if not container then return nil end
-    local ok, result = pcall(function()
-        local obj = container:FindFirstChild(fieldName)
-        if not obj then return nil end
-        if obj:IsA("StringValue") or obj:IsA("IntValue") or obj:IsA("NumberValue") or obj:IsA("BoolValue") then
-            return obj.Value
-        end
-        if obj:IsA("TextLabel") or obj:IsA("TextBox") then
-            return obj.Text
-        end
-        if obj.Value ~= nil then
-            return obj.Value
-        end
-        if obj.Text ~= nil then
-            return obj.Text
-        end
-        return tostring(obj)
+-- Helper to safely get the remote by name
+local function getRemote(name)
+    local ok, remote = pcall(function()
+        return ReplicatedStorage:WaitForChild("Modules"):WaitForChild("Internals"):WaitForChild("Skeleton"):WaitForChild("Conduit"):WaitForChild("Instances"):WaitForChild(name)
     end)
-    if ok then return result end
+    if ok then return remote end
     return nil
 end
 
--- Find the current Eggtag and its parent name
-local function findEggTag()
-    for _, child in ipairs(workspace:GetChildren()) do
-        local eggtag = child:FindFirstChild("Eggtag")
-        if eggtag then
-            return eggtag, child.Name
+local requestEggRemote = getRemote("_requestEgg")
+local purchaseEggRemote = getRemote("_purchaseEgg")
+
+-- Generic safe reader for common value containers
+local function readValue(obj)
+    if not obj then return nil end
+    if typeof(obj) == "Instance" then
+        if obj:IsA("StringValue") or obj:IsA("IntValue") or obj:IsA("NumberValue") or obj:IsA("BoolValue") then
+            return obj.Value
         end
-    end
-    for _, desc in ipairs(workspace:GetDescendants()) do
-        if desc.Name == "Eggtag" then
-            local parent = desc.Parent
-            return desc, parent and parent.Name or nil
+        if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
+            return obj.Text
         end
+        -- Some UI frameworks store text in a child named "Text" or "Value"
+        local v = obj:FindFirstChild("Value") or obj:FindFirstChild("Text")
+        if v and (v:IsA("StringValue") or v:IsA("IntValue") or v:IsA("NumberValue")) then
+            return v.Value
+        end
+        -- Try common properties safely
+        local ok, val = pcall(function() return obj.Value end)
+        if ok and val ~= nil then return val end
+        ok, val = pcall(function() return obj.Text end)
+        if ok and val ~= nil then return val end
     end
-    return nil, nil
+    return nil
 end
 
--- Update UI labels from a given eggtag instance
-local function updateEggInfo(eggtag, parentName)
-    if not eggtag then
-        ParentLabel:Set("Parent: N/A")
-        PriceLabel:Set("Price: N/A")
-        RarityLabel:Set("Rarity: N/A")
-        VarietyLabel:Set("Variety: N/A")
-        return
-    end
+-- Parse an Eggtag instance and return both the instance and parsed info
+local function parseEggtagInstance(tag)
+    if not tag or not tag.Parent then return nil end
+    local model = tag.Parent
+    local modelName = tostring(model.Name or "")
 
-    local container = eggtag:FindFirstChild("Container") or eggtag
-    local price = readContainerField(container, "Price") or "N/A"
-    local rarity = readContainerField(container, "Rarity") or "N/A"
-    local variety = readContainerField(container, "Variety") or "N/A"
+    -- Container may be a child named "Container" or the tag itself
+    local container = tag:FindFirstChild("Container") or tag
 
-    ParentLabel:Set("Parent: " .. (tostring(parentName) or "N/A"))
-    PriceLabel:Set("Price: " .. tostring(price))
-    RarityLabel:Set("Rarity: " .. tostring(rarity))
-    VarietyLabel:Set("Variety: " .. tostring(variety))
-end
-
-local currentEggTag = nil
-local currentParentName = nil
-
--- Timing and retry configuration (tweak these to control speed/behavior)
-local interRemoteDelay = 0.4        -- delay between request and purchase attempts (seconds)
-local spawnTimeout = 6              -- how long to wait for an egg to spawn after request (seconds)
-local purchaseTimeout = 6           -- how long to wait for egg removal after purchase attempt (seconds)
-local loopRetryInterval = 0.8       -- main loop retry interval (seconds)
-local requestRetryInterval = 0.8    -- how often to retry _requestEgg when continuously requesting (seconds)
-local maxRequestAttempts = nil      -- nil = unlimited; or set a number to cap repeated requests
-
--- Forward declaration so refreshCurrentEgg can be referenced inside listeners
-local refreshCurrentEgg
-
-local function bindContainerListeners(eggtag)
-    if not eggtag then return end
-    local container = eggtag:FindFirstChild("Container") or eggtag
-    if not container then return end
-
-    -- Disconnect previous listeners stored on the container (if any)
-    if container._rayfield_listeners then
-        for _, conn in ipairs(container._rayfield_listeners) do
-            pcall(function() conn:Disconnect() end)
+    -- Helper to find child ignoring case and searching descendants
+    local function findChildIgnoreCase(parent, candidates)
+        if not parent then return nil end
+        for _, name in ipairs(candidates) do
+            local c = parent:FindFirstChild(name)
+            if c then return c end
         end
-    end
-    container._rayfield_listeners = {}
-
-    -- Listen for children changes on the container
-    local added = container.ChildAdded:Connect(function() pcall(refreshCurrentEgg) end)
-    local removed = container.ChildRemoved:Connect(function() pcall(refreshCurrentEgg) end)
-    table.insert(container._rayfield_listeners, added)
-    table.insert(container._rayfield_listeners, removed)
-
-    -- Listen for value/text changes on relevant children
-    for _, obj in ipairs(container:GetChildren()) do
-        if obj:IsA("StringValue") or obj:IsA("NumberValue") or obj:IsA("IntValue") or obj:IsA("BoolValue") or obj:IsA("TextLabel") or obj:IsA("TextBox") then
-            local conn = obj.Changed:Connect(function() pcall(refreshCurrentEgg) end)
-            table.insert(container._rayfield_listeners, conn)
-        end
-    end
-end
-
--- Refresh function that also binds listeners immediately when egg changes
-function refreshCurrentEgg()
-    local eggtag, parentName = findEggTag()
-    if eggtag ~= currentEggTag or parentName ~= currentParentName then
-        currentEggTag = eggtag
-        currentParentName = parentName
-        updateEggInfo(currentEggTag, currentParentName)
-        -- Bind listeners to the new container immediately so manual spawns are tracked
-        pcall(function() bindContainerListeners(currentEggTag) end)
-    else
-        updateEggInfo(currentEggTag, currentParentName)
-    end
-end
-
-workspace.DescendantAdded:Connect(function(desc)
-    if desc.Name == "Eggtag" then
-        wait(0.05)
-        pcall(refreshCurrentEgg)
-    end
-end)
-
--- State flags
-local lastPurchaseConfirmed = true
-local purchaseInProgress = false
-
--- When an egg is removed (manually bought or otherwise), treat it as a confirmed purchase so the state machine continues
-workspace.DescendantRemoving:Connect(function(desc)
-    if desc.Name == "Eggtag" then
-        wait(0.05)
-        pcall(function()
-            refreshCurrentEgg()
-            local eggtag, _ = findEggTag()
-            if not eggtag then
-                lastPurchaseConfirmed = true
-                purchaseInProgress = false
+        for _, desc in ipairs(parent:GetDescendants()) do
+            local lname = tostring(desc.Name):lower()
+            for _, name in ipairs(candidates) do
+                if lname == name:lower() or lname:match(name:lower()) then
+                    return desc
+                end
             end
-        end)
-    end
-end)
-
-spawn(function()
-    while true do
-        pcall(function()
-            refreshCurrentEgg()
-            -- Bind listeners to current egg tag if not already bound (extra safety)
-            pcall(function() bindContainerListeners(currentEggTag) end)
-        end)
-        wait(1)
-    end
-end)
-
--- =========================
--- Main tab + Auto Buy toggle
--- =========================
-
-local MainTab = Window:CreateTab("Main", 4483362458)
-local MainSection = MainTab:CreateSection("Automation")
-
--- Helper: try to find the Instances folder and remotes; returns folder or nil + error
-local function getInstancesFolder()
-    local ok, inst = pcall(function()
-        local rs = game:GetService("ReplicatedStorage")
-        local modules = rs:WaitForChild("Modules", 2)
-        if not modules then error("Modules not found") end
-        local internals = modules:WaitForChild("Internals", 2)
-        if not internals then error("Internals not found") end
-        local skeleton = internals:WaitForChild("Skeleton", 2)
-        if not skeleton then error("Skeleton not found") end
-        local conduit = skeleton:WaitForChild("Conduit", 2)
-        if not conduit then error("Conduit not found") end
-        local instances = conduit:WaitForChild("Instances", 2)
-        if not instances then error("Instances not found") end
-        return instances
-    end)
-    if ok then return inst end
-    return nil, inst
-end
-
--- Fire _requestEgg remote and print exact remote object info
-local function fireRequestEgg()
-    local instances, err = getInstancesFolder()
-    if not instances then
-        return false, "Instances folder not found: " .. tostring(err)
-    end
-    local req = instances:FindFirstChild("_requestEgg")
-    if not req then
-        return false, "_requestEgg remote not found in Instances"
-    end
-
-    local okName, fullName = pcall(function() return req:GetFullName() end)
-    print("[fireRequestEgg] About to call _requestEgg remote. Object tostring:", tostring(req), "FullName:", (okName and fullName) and fullName or "unknown")
-
-    local ok, res = pcall(function()
-        local args = {
-            {
-                __raw = true,
-                data = {}
-            }
-        }
-        if req.FireServer then
-            req:FireServer(unpack(args))
-        elseif req.InvokeServer then
-            req:InvokeServer(unpack(args))
-        else
-            error("_requestEgg has no FireServer/InvokeServer")
         end
-    end)
-    return ok, res
-end
-
--- Utility: encode args preview safely
-local HttpService = game:GetService("HttpService")
-local function argsPreview(args)
-    local ok, json = pcall(function() return HttpService:JSONEncode(args) end)
-    if ok then return json end
-    return tostring(args)
-end
-
--- Improved firePurchaseEgg: detects remote type, tries common arg styles, logs results and prints exact remote object info
-local function firePurchaseEgg(id, rarity, variety)
-    local instances, err = getInstancesFolder()
-    if not instances then
-        return false, "Instances folder not found: " .. tostring(err)
+        return nil
     end
 
-    local pur = instances:FindFirstChild("_purchaseEgg")
-    if not pur then
-        return false, "_purchaseEgg remote not found in Instances"
+    local rarityObj = findChildIgnoreCase(container, {"Rarity", "rarity", "RarityLabel", "rarityLabel"})
+    local varietyObj = findChildIgnoreCase(container, {"Variety", "variety", "Type", "type", "VarietyLabel"})
+    local priceObj = findChildIgnoreCase(container, {"Price", "price", "Cost", "cost"})
+
+    local rarity = readValue(rarityObj)
+    local variety = readValue(varietyObj)
+    local price = readValue(priceObj)
+
+    if type(rarity) == "string" then rarity = rarity:match("^%s*(.-)%s*$") end
+    if type(variety) == "string" then variety = variety:match("^%s*(.-)%s*$") end
+
+    -- If rarity/variety are still nil, try scanning descendants for likely text
+    if (not rarity or rarity == "") and container then
+        for _, v in ipairs(container:GetDescendants()) do
+            local n = tostring(v.Name):lower()
+            if n:match("rar") or n:match("rarity") then
+                local val = readValue(v)
+                if val and val ~= "" then
+                    rarity = val
+                    break
+                end
+            end
+        end
+    end
+    if (not variety or variety == "") and container then
+        for _, v in ipairs(container:GetDescendants()) do
+            local n = tostring(v.Name):lower()
+            if n:match("var") or n:match("type") then
+                local val = readValue(v)
+                if val and val ~= "" then
+                    variety = val
+                    break
+                end
+            end
+        end
     end
 
-    local args = {
+    if modelName and modelName ~= "" and rarity and variety then
+        local safeModelName = tostring(modelName):gsub("%s+", "_")
+        local id = "entity_" .. safeModelName .. "_egg"
+        return {
+            tagInstance = tag,
+            model = model,
+            modelName = modelName,
+            id = id,
+            rarity = tostring(rarity),
+            variety = tostring(variety),
+            price = price
+        }
+    end
+
+    return nil
+end
+
+-- Find any Eggtag in workspace and return parsed info (first found)
+local function findEggInWorkspace()
+    -- quick top-level scan
+    for _, child in ipairs(Workspace:GetChildren()) do
+        local tag = child:FindFirstChild("Eggtag")
+        if tag then
+            local info = parseEggtagInstance(tag)
+            if info then return info end
+        end
+    end
+    -- deeper scan
+    for _, desc in ipairs(Workspace:GetDescendants()) do
+        if desc.Name == "Eggtag" then
+            local info = parseEggtagInstance(desc)
+            if info then return info end
+        end
+    end
+    return nil
+end
+
+-- Build args for remotes
+local function buildRequestArgs()
+    return {
+        {
+            __raw = true,
+            data = {}
+        }
+    }
+end
+
+local function buildPurchaseArgs(info)
+    return {
         {
             __raw = true,
             data = {
-                id = tostring(id or ""),
-                rarity = tostring(rarity or ""),
-                variety = tostring(variety or "")
+                id = info.id,
+                rarity = info.rarity,
+                variety = info.variety
             }
         }
     }
-
-    local okName, fullName = pcall(function() return pur:GetFullName() end)
-    print("[firePurchaseEgg] About to call _purchaseEgg remote. Object tostring:", tostring(pur), "FullName:", (okName and fullName) and fullName or "unknown")
-    print("[firePurchaseEgg] Args preview:", argsPreview(args))
-
-    -- Try FireServer(unpack(args)) first if available
-    if pur.FireServer then
-        local ok, res = pcall(function() pur:FireServer(unpack(args)) end)
-        if ok then
-            print("[firePurchaseEgg] Called FireServer(unpack(args)) successfully.")
-            return true, "FireServer(unpack(args)) succeeded"
-        else
-            print("[firePurchaseEgg] FireServer(unpack(args)) failed:", tostring(res))
-            local ok2, res2 = pcall(function() pur:FireServer(args) end)
-            if ok2 then
-                print("[firePurchaseEgg] Called FireServer(args) successfully (table as single arg).")
-                return true, "FireServer(args) succeeded"
-            else
-                print("[firePurchaseEgg] FireServer(args) also failed:", tostring(res2))
-            end
-        end
-    end
-
-    -- Try InvokeServer variants if available
-    if pur.InvokeServer then
-        local ok, res = pcall(function() return pur:InvokeServer(unpack(args)) end)
-        if ok then
-            print("[firePurchaseEgg] Called InvokeServer(unpack(args)) successfully. Return:", tostring(res))
-            return true, "InvokeServer(unpack(args)) succeeded"
-        else
-            print("[firePurchaseEgg] InvokeServer(unpack(args)) failed:", tostring(res))
-            local ok2, res2 = pcall(function() return pur:InvokeServer(args) end)
-            if ok2 then
-                print("[firePurchaseEgg] Called InvokeServer(args) successfully. Return:", tostring(res2))
-                return true, "InvokeServer(args) succeeded"
-            else
-                print("[firePurchaseEgg] InvokeServer(args) also failed:", tostring(res2))
-            end
-        end
-    end
-
-    return false, "All call attempts failed for remote: " .. ((okName and fullName) and fullName or tostring(pur))
 end
 
--- Wait for egg removal (confirmation of purchase) up to timeout seconds
-local function waitForEggRemoval(timeout)
-    local start = tick()
-    while tick() - start < (timeout or purchaseTimeout) do
-        local eggtag, _ = findEggTag()
-        if not eggtag then
+-- Wait helpers
+local function waitForEggToAppear(timeout)
+    timeout = timeout or 8
+    local elapsed = 0
+    local interval = 0.35
+    while elapsed < timeout do
+        local info = findEggInWorkspace()
+        if info then return info end
+        wait(interval)
+        elapsed = elapsed + interval
+    end
+    return nil
+end
+
+local function waitForPriceToPopulate(info, timeout)
+    timeout = timeout or 6
+    local elapsed = 0
+    local interval = 0.35
+    while elapsed < timeout do
+        if not info or not info.tagInstance or not info.tagInstance.Parent then return nil end
+        -- re-parse the same tag to get updated price/fields
+        local refreshed = parseEggtagInstance(info.tagInstance)
+        if refreshed and refreshed.price and tostring(refreshed.price) ~= "" then
+            return refreshed
+        end
+        wait(interval)
+        elapsed = elapsed + interval
+    end
+    return nil
+end
+
+-- Confirm purchase by checking that the egg's tag instance or model was removed or changed
+local function waitForPurchaseConfirmation(info, timeout)
+    timeout = timeout or 6
+    local elapsed = 0
+    local interval = 0.25
+    -- If the tag instance is destroyed or parent changed, assume purchase/consumption
+    while elapsed < timeout do
+        if not info or not info.tagInstance then
+            return true -- already gone
+        end
+        local ok, exists = pcall(function() return info.tagInstance.Parent ~= nil end)
+        if not ok or not exists then
             return true
         end
-        wait(0.15)
+        -- Some games may keep the tag but change its contents; check if model still has same name or price
+        local current = parseEggtagInstance(info.tagInstance)
+        if not current then
+            return true
+        end
+        -- If price becomes nil or tag removed, treat as consumed
+        wait(interval)
+        elapsed = elapsed + interval
     end
     return false
 end
 
--- Wait for egg spawn (presence of Eggtag) up to timeout seconds
-local function waitForEggSpawn(timeout)
-    local start = tick()
-    while tick() - start < (timeout or spawnTimeout) do
-        local eggtag, parentName = findEggTag()
-        if eggtag then
-            return eggtag, parentName
-        end
-        wait(0.15)
-    end
-    return nil, nil
-end
+-- Main loop control (exposed as start/stop functions; no UI toggle)
+local running = false
+local autoThread = nil
 
--- Try to detect explicit entity id inside the egg container (if the game exposes it)
-local function detectIdFromContainer(container)
-    if not container then return nil end
-    local candidates = {"Id","id","EntityId","entityId","Identifier","identifier","entity_id","Entity_ID"}
-    for _, name in ipairs(candidates) do
-        local v = readContainerField(container, name)
-        if v and tostring(v) ~= "" then
-            return tostring(v)
-        end
-    end
-    -- Try nested children
-    for _, child in ipairs(container:GetChildren()) do
-        if child:IsA("ModuleScript") or child:IsA("StringValue") or child:IsA("Folder") then
-            local v = readContainerField(child, "id") or readContainerField(child, "Id")
-            if v and tostring(v) ~= "" then
-                return tostring(v)
-            end
-        end
-    end
-    return nil
-end
-
--- Build id from parent name as fallback, preserving capitalization pattern like "entity_Nami_egg"
-local function buildEntityIdFromParent(parentName)
-    if not parentName then return nil end
-
-    -- Explicit mapping for known exceptions (add entries as you discover them)
-    local mapping = {
-        -- ["Nami Entity"] = "entity_Nami_egg", -- add mappings here if needed
-    }
-    if mapping[parentName] then
-        return mapping[parentName]
-    end
-
-    local raw = tostring(parentName)
-    raw = raw:gsub("[^%w%s_%-]", "") -- allow letters, numbers, spaces, underscores, hyphens
-    raw = raw:gsub("%s+", "_") -- replace spaces with underscores
-
-    local parts = {}
-    for part in raw:gmatch("[^_]+") do
-        local first = part:sub(1,1) or ""
-        local rest = part:sub(2) or ""
-        table.insert(parts, string.upper(first) .. rest)
-    end
-    local joined = table.concat(parts, "_")
-
-    return "entity_" .. joined .. "_egg"
-end
-
--- Normalize rarity/variety strings to expected casing
-local function normalizeStringForRemote(s)
-    if not s then return "" end
-    s = tostring(s)
-    s = s:gsub("^%s*(.-)%s*$", "%1")
-    local lower = string.lower(s)
-    local capitalized = lower:gsub("(%a)([%w_']*)", function(a,b) return string.upper(a) .. b end)
-    return capitalized
-end
-
--- Spawn requester control
-local spawnRequesterActive = false
-
-local function startSpawnRequester()
-    if spawnRequesterActive then return end
-    spawnRequesterActive = true
-    spawn(function()
-        local attempts = 0
-        while spawnRequesterActive and _G.AutoBuySpinEggs do
-            -- If an egg exists, stop requester
-            local eggtagCheck, parentCheck = findEggTag()
-            if eggtagCheck then
-                -- egg present; stop requester
-                break
-            end
-
-            -- If a purchase is in progress, wait and retry
-            if purchaseInProgress then
-                wait(requestRetryInterval)
-                goto continue
-            end
-
-            -- Optional attempt cap
-            attempts = attempts + 1
-            if maxRequestAttempts and attempts > maxRequestAttempts then
-                print("[SpawnRequester] Reached max request attempts; stopping requester.")
-                break
-            end
-
-            -- Fire request
-            local ok, err = fireRequestEgg()
-            if not ok then
-                print("[SpawnRequester] fireRequestEgg error:", tostring(err))
-            else
-                -- mark pending so main loop doesn't request again immediately
-                lastPurchaseConfirmed = false
-            end
-
-            -- small delay to allow server to spawn
-            wait(interRemoteDelay)
-
-            -- quick check for spawn
-            local eggtag, parentName = waitForEggSpawn(math.min(spawnTimeout, requestRetryInterval))
-            if eggtag then
-                print("[SpawnRequester] Egg spawned after request under parent:", tostring(parentName))
-                refreshCurrentEgg()
-                break
-            end
-
-            wait(requestRetryInterval)
-            ::continue::
-        end
-        spawnRequesterActive = false
-    end)
-end
-
-local function stopSpawnRequester()
-    spawnRequesterActive = false
-end
-
--- Auto Buy+Spin toggle logic (improved)
-_G.AutoBuySpinEggs = _G.AutoBuySpinEggs or false
-
-local AutoBuySpinToggle = MainTab:CreateToggle({
-    Name = "Auto Buy+Spin Eggs",
-    CurrentValue = _G.AutoBuySpinEggs,
-    Flag = "AutoBuySpinEggs",
-    Callback = function(Value)
-        _G.AutoBuySpinEggs = Value
-
-        if Value then
-            spawn(function()
-                while _G.AutoBuySpinEggs do
-                    pcall(function()
-                        refreshCurrentEgg()
-
-                        -- If there's an egg present, always try to buy it (keep retrying until it's removed)
-                        if currentEggTag then
-                            -- If a purchase is already in progress for this egg, skip firing again
-                            if purchaseInProgress then
-                                -- nothing to do; wait for confirmation or next retry
-                                return
-                            end
-
-                            local container = currentEggTag:FindFirstChild("Container") or currentEggTag
-                            local explicitId = detectIdFromContainer(container)
-                            local parentName = currentParentName
-                            local entityId = explicitId or buildEntityIdFromParent(parentName)
-                            local rawRarity = readContainerField(container, "Rarity")
-                            local rawVariety = readContainerField(container, "Variety")
-                            local rarity = normalizeStringForRemote(rawRarity)
-                            local variety = normalizeStringForRemote(rawVariety)
-                            local price = readContainerField(container, "Price")
-
-                            print("[AutoBuySpin] Detected egg -> Parent:", tostring(parentName), "EntityId:", tostring(entityId), "Price:", tostring(price), "Rarity:", tostring(rarity), "Variety:", tostring(variety))
-
-                            if not entityId or entityId == "" then
-                                print("[AutoBuySpin] No entity id available; cannot attempt purchase. Will keep monitoring.")
-                                purchaseInProgress = false
-                            else
-                                -- Always attempt purchase regardless of price. This ensures the script keeps trying even if "too expensive".
-                                purchaseInProgress = true
-                                lastPurchaseConfirmed = false
-                                print("[AutoBuySpin] Attempting purchase:", entityId, rarity, variety)
-                                local ok, err = firePurchaseEgg(entityId, rarity, variety)
-                                if ok then
-                                    -- Wait for the egg to be removed (confirmation) up to timeout
-                                    local confirmed = waitForEggRemoval(purchaseTimeout)
-                                    if confirmed then
-                                        lastPurchaseConfirmed = true
-                                        purchaseInProgress = false
-                                        print("[AutoBuySpin] Purchase confirmed for:", entityId)
-                                    else
-                                        -- Not removed within timeout. Keep trying: mark purchaseInProgress false so next loop will retry.
-                                        purchaseInProgress = false
-                                        lastPurchaseConfirmed = false
-                                        print("[AutoBuySpin] Purchase not confirmed within timeout for:", entityId, "Will retry.")
-                                    end
-                                else
-                                    -- Fire attempt failed (remote call error). Allow retry next loop.
-                                    purchaseInProgress = false
-                                    print("[AutoBuySpin] firePurchaseEgg error:", tostring(err), "Will retry.")
-                                end
-                            end
-
-                            -- If a spawn requester was running, stop it because we have an egg now
-                            if spawnRequesterActive then
-                                stopSpawnRequester()
-                            end
-
-                        else
-                            -- No egg present. Start the spawn requester if allowed and last purchase was confirmed
-                            if lastPurchaseConfirmed then
-                                -- ensure only one requester runs
-                                if not spawnRequesterActive then
-                                    print("[AutoBuySpin] No egg present and last purchase confirmed. Starting spawn requester.")
-                                    startSpawnRequester()
-                                end
-                                -- requester will handle repeated requests; main loop can wait and re-check
-                            else
-                                -- We are waiting for the previous purchase to confirm (or retrying). Do nothing.
-                            end
-                        end
-                    end)
-                    wait(loopRetryInterval) -- retry interval; adjust if you need faster/slower retries
+local function autoSpinBuyLoop()
+    while running do
+        -- Step A: If there's already an egg present, operate on it; otherwise request one
+        local eggInfo = findEggInWorkspace()
+        if not eggInfo then
+            -- Request a new egg only when none exists
+            pcall(function()
+                if requestEggRemote and requestEggRemote.FireServer then
+                    requestEggRemote:FireServer(unpack(buildRequestArgs()))
                 end
-
-                -- When toggle is turned off, ensure requester stops
-                stopSpawnRequester()
             end)
-        else
-            -- toggle turned off: stop requester
-            stopSpawnRequester()
+            -- Wait for egg to appear
+            eggInfo = waitForEggToAppear(8)
+            if not eggInfo then
+                -- nothing spawned; wait a bit and retry
+                local backoff = 1.5
+                local elapsed = 0
+                while elapsed < backoff and running do
+                    wait(0.25)
+                    elapsed = elapsed + 0.25
+                end
+                -- retry loop
+                continue
+            end
         end
-    end,
-})
 
--- Expose for external use if needed
-_G.AutoBuySpinToggle = AutoBuySpinToggle
-_G.GetCurrentEggInfo = function()
-    local ok, info = pcall(function()
-        if not currentEggTag or not currentEggTag.Parent then
-            return {
-                EggTag = nil,
-                ParentName = nil,
-                Price = nil,
-                Rarity = nil,
-                Variety = nil,
-            }
+        -- Step B: Ensure price/rarity/variety are available before attempting purchase
+        if not eggInfo.price or tostring(eggInfo.price) == "" or eggInfo.price == "nil" then
+            local refreshed = waitForPriceToPopulate(eggInfo, 6)
+            if refreshed then
+                eggInfo = refreshed
+            else
+                -- Price still nil after waiting: do NOT spawn a new egg; skip purchase attempt and wait a bit
+                local waitSkip = 1.5
+                local elapsed = 0
+                while elapsed < waitSkip and running do
+                    wait(0.25)
+                    elapsed = elapsed + 0.25
+                end
+                -- Re-evaluate the same egg in next loop iteration
+                continue
+            end
         end
-        local container = currentEggTag:FindFirstChild("Container") or currentEggTag
-        return {
-            EggTag = currentEggTag,
-            ParentName = currentParentName,
-            Price = readContainerField(container, "Price"),
-            Rarity = readContainerField(container, "Rarity"),
-            Variety = readContainerField(container, "Variety"),
-        }
-    end)
-    if ok then return info end
-    return {
-        EggTag = nil,
-        ParentName = nil,
-        Price = nil,
-        Rarity = nil,
-        Variety = nil,
-    }
+
+        -- Step C: Attempt purchase
+        local purchased = false
+        if purchaseEggRemote and purchaseEggRemote.FireServer then
+            pcall(function()
+                local args = buildPurchaseArgs(eggInfo)
+                purchaseEggRemote:FireServer(unpack(args))
+            end)
+            -- Wait for confirmation that the egg was consumed/removed
+            purchased = waitForPurchaseConfirmation(eggInfo, 6)
+        end
+
+        -- Step D: Only request a new egg if purchase was confirmed
+        if purchased then
+            -- small delay before requesting next egg to avoid spamming
+            local postDelay = 0.8
+            local elapsed = 0
+            while elapsed < postDelay and running do
+                wait(0.25)
+                elapsed = elapsed + 0.25
+            end
+            -- loop will request a new egg at top if none exists
+        else
+            -- Purchase failed or not confirmed: do NOT request a new egg.
+            -- Wait a bit and retry purchasing the same egg (or re-evaluate)
+            local retryDelay = 1.5
+            local elapsed = 0
+            while elapsed < retryDelay and running do
+                wait(0.25)
+                elapsed = elapsed + 0.25
+            end
+        end
+    end
 end
 
--- Initial refresh
-pcall(refreshCurrentEgg)
+-- Public functions to start/stop the auto spin+buy loop (no UI toggle)
+function StartAutoSpinBuyEgg()
+    if running then return end
+    running = true
+    autoThread = spawn(autoSpinBuyLoop)
+end
+
+function StopAutoSpinBuyEgg()
+    running = false
+    autoThread = nil
+end
+
+-- End of script
