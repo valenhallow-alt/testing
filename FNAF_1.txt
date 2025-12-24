@@ -1,11 +1,10 @@
--- UnHub Egg Buyer — final full script
--- Features:
--- * Guarded Rayfield loader
--- * Auto-scan watchers (polling)
--- * Conduit listeners
--- * Auto Buy toggle
--- * Mutation dropdown (multi-select) using Rayfield API (MultipleOptions = true)
--- * If rarity not allowed, auto-spawn new egg via _requestEgg remote
+-- UnHub Egg Buyer — updated
+-- Changes:
+-- * Added "Rarity" multi-select dropdown (Basic, Rare, Epic, Legendary, Mythic, Secret)
+-- * Removed "Clear All Mutations" button
+-- * Auto-buy now checks both Mutation (variety) and Rarity before purchasing
+-- * If either check fails, the script requests a new egg instead of buying
+-- * Uses Rayfield dropdown API with MultipleOptions = true
 -- * Minimal console output controlled by DEBUG
 
 local DEBUG = false
@@ -107,7 +106,7 @@ do
     end)
 end
 
--- === Main tab: detection + purchase + Mutation dropdown ===
+-- === Main tab: detection + purchase + Mutation & Rarity dropdowns ===
 do
     local MainTab = Window:CreateTab("Main", 4483362458)
     local MainSection = MainTab:CreateSection("Main")
@@ -129,25 +128,37 @@ do
     local Conduit = nil
     local loopRunning = false
 
-    -- Allowed rarities set (updated by dropdown)
-    local AllowedRarities = {} -- set: AllowedRarities["Normal"] = true
+    -- Allowed sets
+    local AllowedMutations = {}      -- variety-level allowed (e.g., "Normal","Golden",...)
+    local AllowedRarityLevels = {}   -- rarity-level allowed (e.g., "Basic","Rare",...)
 
-    -- Dropdown options (includes Secret)
+    -- Dropdown options
     local MUTATION_OPTIONS = { "Normal", "Golden", "Diamond", "Glitch", "Galaxy", "????", "Secret" }
+    local RARITY_OPTIONS   = { "Basic", "Rare", "Epic", "Legendary", "Mythic", "Secret" }
 
-    -- Helper: set AllowedRarities from list
-    local function setAllowedRarities(list)
-        AllowedRarities = {}
+    -- Helpers to set allowed sets
+    local function setAllowedMutations(list)
+        AllowedMutations = {}
         if type(list) == "table" then
             for _, v in ipairs(list) do
-                if type(v) == "string" then AllowedRarities[tostring(v)] = true end
+                if type(v) == "string" then AllowedMutations[tostring(v)] = true end
             end
         end
-        dbg("Allowed rarities set:", table.concat(list or {}, ","))
+        dbg("AllowedMutations set:", table.concat(list or {}, ","))
+    end
+    local function setAllowedRarityLevels(list)
+        AllowedRarityLevels = {}
+        if type(list) == "table" then
+            for _, v in ipairs(list) do
+                if type(v) == "string" then AllowedRarityLevels[tostring(v)] = true end
+            end
+        end
+        dbg("AllowedRarityLevels set:", table.concat(list or {}, ","))
     end
 
-    -- Initialize default allowed rarities (all selected by default)
-    setAllowedRarities(MUTATION_OPTIONS)
+    -- Initialize defaults (all selected)
+    setAllowedMutations(MUTATION_OPTIONS)
+    setAllowedRarityLevels(RARITY_OPTIONS)
 
     -- Remotes lookup
     local function getInstancesFolder()
@@ -213,8 +224,8 @@ do
                 if type(payload) == "table" then
                     local dataTable = (type(payload.data) == "table") and payload.data or payload
                     local capturedId = tostring(dataTable.id or dataTable.entity_id or dataTable.entity or dataTable.display_name or "")
-                    local capturedRarity = tostring(dataTable.rarity or "Normal")
-                    local capturedVariety = tostring(dataTable.variety or "Normal")
+                    local capturedRarity = tostring(dataTable.rarity or "Basic")
+                    local capturedVariety = tostring(dataTable.variety or dataTable.display_name or "Normal")
                     local capturedSource = tostring(dataTable.source or dataTable.display_name or payload.display_name or LastEgg and LastEgg.source or "")
                     LastEgg = { id = capturedId, rarity = capturedRarity, variety = capturedVariety, source = capturedSource }
                     setStatus("Conduit _requestEgg captured")
@@ -225,8 +236,8 @@ do
                 if type(payload) == "table" then
                     local dataTable = (type(payload.data) == "table") and payload.data or payload
                     local capturedId = tostring(dataTable.id or dataTable.entity_id or dataTable.entity or dataTable.display_name or "")
-                    local capturedRarity = tostring(dataTable.rarity or "Normal")
-                    local capturedVariety = tostring(dataTable.variety or "Normal")
+                    local capturedRarity = tostring(dataTable.rarity or "Basic")
+                    local capturedVariety = tostring(dataTable.variety or dataTable.display_name or "Normal")
                     local capturedSource = tostring(dataTable.source or dataTable.display_name or payload.display_name or LastEgg and LastEgg.source or "")
                     LastEgg = { id = capturedId, rarity = capturedRarity, variety = capturedVariety, source = capturedSource }
                     setStatus("Conduit _purchaseEgg captured")
@@ -257,7 +268,7 @@ do
             rarity = rarity and trim(rarity) or nil
             variety = variety and trim(variety) or nil
             if id and rarity and variety then return { id = id, rarity = rarity, variety = variety } end
-            if id or rarity or variety then return { id = id or "", rarity = rarity or "Normal", variety = variety or "Normal" } end
+            if id or rarity or variety then return { id = id or "", rarity = rarity or "Basic", variety = variety or "Normal" } end
             return nil
         end
         local function tryAttr(n)
@@ -342,16 +353,20 @@ do
         if not preferred then preferred = normalizeToken(egg.id) end
         if not preferred then preferred = normalizeToken(egg.variety) or normalizeToken(egg.rarity) or "unknown" end
         local finalId = "entity_" .. tostring(preferred) .. "_egg"
-        return { { __raw = true, data = { id = finalId, rarity = tostring(egg.rarity or "Normal"), variety = tostring(egg.variety or "Normal") } } }
+        return { { __raw = true, data = { id = finalId, rarity = tostring(egg.rarity or "Basic"), variety = tostring(egg.variety or "Normal") } } }
     end
 
-    -- Check allowed rarity
+    -- Allowed checks
+    local function isMutationAllowed(variety)
+        if not variety then return false end
+        return AllowedMutations[tostring(variety)] == true
+    end
     local function isRarityAllowed(rarity)
         if not rarity then return false end
-        return AllowedRarities[tostring(rarity)] == true
+        return AllowedRarityLevels[tostring(rarity)] == true
     end
 
-    -- Purchase logic with rarity check; if not allowed, request new egg instead
+    -- Purchase logic with both checks; if not allowed, request new egg instead
     local lastFire = 0
     local FIRE_COOLDOWN = 1.5
 
@@ -360,6 +375,13 @@ do
         if not purchaseRemote then setStatus("Purchase remote missing"); return false end
         if not LastEgg then setStatus("No egg data to purchase"); return false end
         if tick() - lastFire < FIRE_COOLDOWN then setStatus("Cooldown active"); return false end
+
+        -- If mutation (variety) not allowed, request new egg and skip purchase
+        if not isMutationAllowed(LastEgg.variety) then
+            setStatus(string.format("Mutation '%s' not allowed — requesting new egg", tostring(LastEgg.variety)))
+            pcall(requestNewEgg)
+            return false
+        end
 
         -- If rarity not allowed, request new egg and skip purchase
         if not isRarityAllowed(LastEgg.rarity) then
@@ -545,7 +567,7 @@ do
     })
 
     -- UI: Mutation dropdown (multi-select) using Rayfield API
-    local Dropdown = MainTab:CreateDropdown({
+    local MutationDropdown = MainTab:CreateDropdown({
         Name = "Mutation",
         Options = MUTATION_OPTIONS,
         CurrentOption = MUTATION_OPTIONS, -- default: all selected
@@ -553,56 +575,99 @@ do
         Flag = "MutationDropdown",
         Callback = function(selectedOptions)
             if type(selectedOptions) == "table" then
-                setAllowedRarities(selectedOptions)
+                setAllowedMutations(selectedOptions)
                 setStatus("Allowed mutations updated")
             else
-                setAllowedRarities({})
+                setAllowedMutations({})
                 setStatus("Allowed mutations cleared")
             end
         end,
     })
 
-    -- Select All / Clear buttons using Dropdown:Set
+    -- Select All Mutations button (keep)
     MainTab:CreateButton({
         Name = "Select All Mutations",
         Callback = function()
-            if Dropdown and type(Dropdown.Set) == "function" then
-                pcall(function() Dropdown:Set(MUTATION_OPTIONS) end)
+            if MutationDropdown and type(MutationDropdown.Set) == "function" then
+                pcall(function() MutationDropdown:Set(MUTATION_OPTIONS) end)
             else
-                setAllowedRarities(MUTATION_OPTIONS)
+                setAllowedMutations(MUTATION_OPTIONS)
             end
             setStatus("All mutations selected")
         end
     })
 
-    MainTab:CreateButton({
-        Name = "Clear All Mutations",
-        Callback = function()
-            if Dropdown and type(Dropdown.Set) == "function" then
-                pcall(function() Dropdown:Set({}) end)
+    -- UI: Rarity dropdown (multi-select)
+    local RarityDropdown = MainTab:CreateDropdown({
+        Name = "Rarity",
+        Options = RARITY_OPTIONS,
+        CurrentOption = RARITY_OPTIONS, -- default: all selected
+        MultipleOptions = true,
+        Flag = "RarityDropdown",
+        Callback = function(selectedOptions)
+            if type(selectedOptions) == "table" then
+                setAllowedRarityLevels(selectedOptions)
+                setStatus("Allowed rarities updated")
             else
-                setAllowedRarities({})
+                setAllowedRarityLevels({})
+                setStatus("Allowed rarities cleared")
             end
-            setStatus("All mutations cleared")
+        end,
+    })
+
+    -- Select All / Clear buttons for Rarity
+    MainTab:CreateButton({
+        Name = "Select All Rarities",
+        Callback = function()
+            if RarityDropdown and type(RarityDropdown.Set) == "function" then
+                pcall(function() RarityDropdown:Set(RARITY_OPTIONS) end)
+            else
+                setAllowedRarityLevels(RARITY_OPTIONS)
+            end
+            setStatus("All rarities selected")
         end
     })
 
-    -- Initialize AllowedRarities from CurrentOption (if Rayfield saved config restored it)
+    MainTab:CreateButton({
+        Name = "Clear All Rarities",
+        Callback = function()
+            if RarityDropdown and type(RarityDropdown.Set) == "function" then
+                pcall(function() RarityDropdown:Set({}) end)
+            else
+                setAllowedRarityLevels({})
+            end
+            setStatus("All rarities cleared")
+        end
+    })
+
+    -- Initialize Allowed sets from dropdown saved state (deferred)
     task.defer(function()
         task.wait(0.05)
-        local initial = MUTATION_OPTIONS
-        if Dropdown and type(Dropdown.Get) == "function" then
-            local ok, val = pcall(function() return Dropdown:Get() end)
-            if ok and type(val) == "table" and #val > 0 then initial = val end
+        local initialMutations = MUTATION_OPTIONS
+        if MutationDropdown and type(MutationDropdown.Get) == "function" then
+            local ok, val = pcall(function() return MutationDropdown:Get() end)
+            if ok and type(val) == "table" and #val > 0 then initialMutations = val end
         else
-            -- try reading saved flag via Window.Flags if available
             pcall(function()
                 if Window.Flags and Window.Flags.MutationDropdown and type(Window.Flags.MutationDropdown) == "table" then
-                    initial = Window.Flags.MutationDropdown
+                    initialMutations = Window.Flags.MutationDropdown
                 end
             end)
         end
-        setAllowedRarities(initial)
+        setAllowedMutations(initialMutations)
+
+        local initialRarities = RARITY_OPTIONS
+        if RarityDropdown and type(RarityDropdown.Get) == "function" then
+            local ok2, val2 = pcall(function() return RarityDropdown:Get() end)
+            if ok2 and type(val2) == "table" and #val2 > 0 then initialRarities = val2 end
+        else
+            pcall(function()
+                if Window.Flags and Window.Flags.RarityDropdown and type(Window.Flags.RarityDropdown) == "table" then
+                    initialRarities = Window.Flags.RarityDropdown
+                end
+            end)
+        end
+        setAllowedRarityLevels(initialRarities)
     end)
 end
 
