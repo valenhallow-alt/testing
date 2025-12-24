@@ -96,9 +96,7 @@ do
         Name = "Auto Buy+Spin Eggs",
         CurrentValue = false,
         Flag = "AutoBuySpinEggs",
-        Callback = function(Value)
-            -- placeholder; actual control handled below
-        end,
+        Callback = function(Value) end,
     })
 
     -- Always enabled status display
@@ -113,15 +111,12 @@ do
     -- Helper to read a text-like child safely
     local function readTextOrValue(inst)
         if not inst then return nil end
-        -- Common GUI text objects
         if inst:IsA("TextLabel") or inst:IsA("TextBox") or inst:IsA("TextButton") then
             return inst.Text
         end
-        -- Value objects (StringValue, IntValue, NumberValue, etc.)
         if inst:IsA("ValueBase") and inst.Value ~= nil then
             return tostring(inst.Value)
         end
-        -- Try common properties safely
         local ok, txt = pcall(function() return inst.Text end)
         if ok and type(txt) == "string" and txt ~= "" then return txt end
         local ok2, val = pcall(function() return inst.Value end)
@@ -161,10 +156,10 @@ do
         return table.concat(lines, "\n")
     end
 
-    -- Helper to safely get the remotes (returns nil if not found)
-    local function getRemotes()
+    -- Helper to safely find the remotes (non-blocking)
+    local function findRemotes()
         local ok, modules = pcall(function()
-            return game:GetService("ReplicatedStorage"):WaitForChild("Modules")
+            return game:GetService("ReplicatedStorage"):FindFirstChild("Modules")
         end)
         if not ok or not modules then return nil, nil end
 
@@ -191,7 +186,7 @@ do
                 data = {}
             }
         }
-        local ok, err = pcall(function()
+        local ok = pcall(function()
             requestRemote:FireServer(unpack(args))
         end)
         return ok
@@ -210,7 +205,7 @@ do
                 }
             }
         }
-        local ok, err = pcall(function()
+        local ok = pcall(function()
             purchaseRemote:FireServer(unpack(args))
         end)
         return ok
@@ -239,88 +234,49 @@ do
         end
     end)
 
-    -- Auto Buy+Spin Eggs loop
+    -- Auto Buy+Spin Eggs loop (fixed logic)
     spawn(function()
-        -- Throttle to avoid spamming; adjust as needed
-        local cycleDelay = 1.0 -- delay between full cycles (seconds)
+        local cycleDelay = 1.5 -- delay between full cycles (seconds)
         while true do
             if autoBuyEnabled then
-                -- Get remotes (do not WaitForChild here to avoid blocking; use FindFirstChild chain with fallback)
-                local requestRemote, purchaseRemote = getRemotes()
-
-                -- Attempt to spawn an egg
-                local spawnedOk = false
-                if requestRemote then
-                    spawnedOk = fireRequestEgg(requestRemote)
-                else
-                    -- try to locate remotes again using WaitForChild (safer but may yield)
-                    pcall(function()
-                        local modules = game:GetService("ReplicatedStorage"):WaitForChild("Modules", 1)
-                        if modules then
-                            local internals = modules:FindFirstChild("Internals")
-                            if internals then
-                                local skeleton = internals:FindFirstChild("Skeleton")
-                                if skeleton then
-                                    local conduit = skeleton:FindFirstChild("Conduit")
-                                    if conduit then
-                                        local instances = conduit:FindFirstChild("Instances")
-                                        if instances then
-                                            requestRemote = instances:FindFirstChild("_requestEgg")
-                                            purchaseRemote = instances:FindFirstChild("_purchaseEgg")
-                                            if requestRemote then
-                                                spawnedOk = fireRequestEgg(requestRemote)
-                                            end
-                                        end
-                                    end
-                                end
-                            end
-                        end
-                    end)
-                end
-
-                -- Wait for the egg to appear / server processing
-                wait(0.4)
-
-                -- Read the current first detected egg from workspace (use status function)
+                -- 1) Check if an egg already exists in workspace. If so, attempt purchase instead of requesting a new egg.
                 local eggs = {}
-                pcall(function()
-                    eggs = getAllSpawnedEggsInfo()
-                end)
+                pcall(function() eggs = getAllSpawnedEggsInfo() end)
+
+                -- Find remotes once per cycle (non-blocking)
+                local requestRemote, purchaseRemote = findRemotes()
 
                 if eggs and #eggs > 0 then
-                    -- Use the first egg found as the target
+                    -- We have at least one egg; attempt to purchase the first one
                     local target = eggs[1]
                     local id = target.Name
                     local rarity = target.Rarity
                     local variety = target.Variety
 
-                    -- Ensure we have purchaseRemote
+                    -- Ensure purchaseRemote exists; try a short WaitForChild fallback if missing
                     if not purchaseRemote then
-                        -- try to find it again quickly
-                        local ok2, modules = pcall(function()
-                            return game:GetService("ReplicatedStorage"):FindFirstChild("Modules")
-                        end)
-                        if ok2 and modules then
-                            local internals = modules:FindFirstChild("Internals")
-                            if internals then
-                                local skeleton = internals:FindFirstChild("Skeleton")
-                                if skeleton then
-                                    local conduit = skeleton:FindFirstChild("Conduit")
-                                    if conduit then
-                                        local instances = conduit:FindFirstChild("Instances")
-                                        if instances then
-                                            purchaseRemote = instances:FindFirstChild("_purchaseEgg")
+                        pcall(function()
+                            local modules = game:GetService("ReplicatedStorage"):WaitForChild("Modules", 1)
+                            if modules then
+                                local internals = modules:FindFirstChild("Internals")
+                                if internals then
+                                    local skeleton = internals:FindFirstChild("Skeleton")
+                                    if skeleton then
+                                        local conduit = skeleton:FindFirstChild("Conduit")
+                                        if conduit then
+                                            local instances = conduit:FindFirstChild("Instances")
+                                            if instances then
+                                                purchaseRemote = instances:FindFirstChild("_purchaseEgg")
+                                            end
                                         end
                                     end
                                 end
                             end
-                        end
+                        end)
                     end
 
                     if purchaseRemote then
-                        -- Fire purchase remote with the detected values
                         local okPurchase = firePurchaseEgg(purchaseRemote, id, rarity, variety)
-                        -- Optionally update status paragraph to reflect action
                         if okPurchase then
                             pcall(function()
                                 StatusParagraph:Set({Title = "Egg Status", Content = ("Attempted purchase: %s | Rarity: %s | Variety: %s"):format(tostring(id), tostring(rarity), tostring(variety))})
@@ -330,19 +286,87 @@ do
                                 StatusParagraph:Set({Title = "Egg Status", Content = ("Purchase failed for: %s"):format(tostring(id))})
                             end)
                         end
+                        -- After attempting purchase, wait a bit longer to allow server to process and to avoid immediate re-requests
+                        wait(1.2)
                     else
                         pcall(function()
-                            StatusParagraph:Set({Title = "Egg Status", Content = "Purchase remote not found."})
+                            StatusParagraph:Set({Title = "Egg Status", Content = "Purchase remote not found; cannot purchase."})
                         end)
+                        -- If purchase remote not found, avoid spamming request; wait and retry remotes later
+                        wait(2.0)
                     end
                 else
-                    -- No egg detected after spawn attempt; update status
-                    pcall(function()
-                        StatusParagraph:Set({Title = "Egg Status", Content = "No egg detected to purchase."})
-                    end)
+                    -- No egg present: request a new egg once, then wait and poll for the spawned egg
+                    if requestRemote then
+                        local okRequest = fireRequestEgg(requestRemote)
+                        if okRequest then
+                            pcall(function()
+                                StatusParagraph:Set({Title = "Egg Status", Content = "Requested new egg, waiting for spawn..."})
+                            end)
+                        else
+                            pcall(function()
+                                StatusParagraph:Set({Title = "Egg Status", Content = "Request remote failed to fire."})
+                            end)
+                        end
+                    else
+                        -- Try a short WaitForChild fallback to locate request remote if missing
+                        pcall(function()
+                            local modules = game:GetService("ReplicatedStorage"):WaitForChild("Modules", 1)
+                            if modules then
+                                local internals = modules:FindFirstChild("Internals")
+                                if internals then
+                                    local skeleton = internals:FindFirstChild("Skeleton")
+                                    if skeleton then
+                                        local conduit = skeleton:FindFirstChild("Conduit")
+                                        if conduit then
+                                            local instances = conduit:FindFirstChild("Instances")
+                                            if instances then
+                                                requestRemote = instances:FindFirstChild("_requestEgg")
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end)
+                        if requestRemote then
+                            pcall(function()
+                                requestRemote:FireServer({{__raw = true, data = {}}})
+                                StatusParagraph:Set({Title = "Egg Status", Content = "Requested new egg (fallback), waiting for spawn..."})
+                            end)
+                        else
+                            pcall(function()
+                                StatusParagraph:Set({Title = "Egg Status", Content = "Request remote not found; cannot spawn egg."})
+                            end)
+                            wait(2.0)
+                        end
+                    end
+
+                    -- Wait and poll for the egg to appear (up to timeout)
+                    local found = false
+                    local timeout = 3.0
+                    local elapsed = 0
+                    local pollInterval = 0.15
+                    while elapsed < timeout do
+                        wait(pollInterval)
+                        elapsed = elapsed + pollInterval
+                        local newEggs = {}
+                        pcall(function() newEggs = getAllSpawnedEggsInfo() end)
+                        if newEggs and #newEggs > 0 then
+                            found = true
+                            break
+                        end
+                    end
+
+                    if not found then
+                        pcall(function()
+                            StatusParagraph:Set({Title = "Egg Status", Content = "No egg spawned after request."})
+                        end)
+                        -- small delay before next cycle to avoid spamming
+                        wait(1.0)
+                    end
                 end
 
-                -- Wait a short time before next cycle to avoid spamming
+                -- End of cycle delay
                 wait(cycleDelay)
             else
                 wait(0.25)
