@@ -1,19 +1,17 @@
--- UnHub Egg Buyer — streamlined
--- Changes:
--- * Removed "Scan Now" and "Dump workspace top-level names" buttons
--- * Replaced console prints/warns with dbg(...) controlled by DEBUG flag (default: false)
--- * After a successful purchase, the script will call the _requestEgg remote to spawn a new egg when Auto Buy is ON
--- * Keeps Rayfield status updates via setStatus(...) so UI still reflects state
+-- UnHub Egg Buyer — streamlined with Mutation dropdown (Secret added)
+-- Features:
+-- * Guarded Rayfield loader
+-- * Auto-scan watchers (polling)
+-- * Conduit listeners
+-- * Auto Buy toggle
+-- * Mutation dropdown (multi-select) to control allowed rarities (includes "Secret")
+-- * If rarity not allowed, auto-spawn new egg via _requestEgg remote
+-- * Minimal console output controlled by DEBUG
 
--- DEBUG flag: set to true to re-enable console debug output
 local DEBUG = false
-local function dbg(...)
-    if DEBUG then
-        print("[UnHub]", ...)
-    end
-end
+local function dbg(...) if DEBUG then print("[UnHub]", ...) end end
 
--- Safely destroy any previous Rayfield instance
+-- Destroy previous Rayfield instance if present
 if _G.RayfieldInstance then
     pcall(function()
         if type(_G.RayfieldInstance.Destroy) == "function" then
@@ -38,15 +36,13 @@ do
     if ok and type(libOrErr) == "table" then
         Rayfield = libOrErr
         _G.RayfieldInstance = Rayfield
-        dbg("Rayfield loaded successfully")
+        dbg("Rayfield loaded")
     else
-        -- keep UI-safe behavior: show status and abort
         Rayfield = nil
     end
 end
 
-if not Rayfield or type(Rayfield) ~= "table" or type(Rayfield.CreateWindow) ~= "function" then
-    -- If Rayfield didn't load, abort to avoid nil calls
+if not Rayfield or type(Rayfield.CreateWindow) ~= "function" then
     return
 end
 
@@ -64,24 +60,17 @@ local okWindow, Window = pcall(function()
         KeySettings = { Title = "UnHub", Subtitle = "Key", Note = "", FileName = "Key", SaveKey = false, GrabKeyFromSite = false, Key = {} }
     })
 end)
-
-if not okWindow or not Window then
-    return
-end
+if not okWindow or not Window then return end
 
 -- Resolve parent GUI safely for the small toggle button
 local parentGui = nil
 pcall(function()
     if type(Rayfield.GetParent) == "function" then
         local p = Rayfield:GetParent()
-        if p and p.Parent and p.Parent:IsA("Instance") then
-            parentGui = p.Parent
-        end
+        if p and p.Parent and p.Parent:IsA("Instance") then parentGui = p.Parent end
     end
 end)
-if not parentGui or not parentGui:IsA("Instance") then
-    parentGui = game:GetService("CoreGui")
-end
+if not parentGui or not parentGui:IsA("Instance") then parentGui = game:GetService("CoreGui") end
 
 -- Minimal UI toggle button (guarded)
 do
@@ -107,139 +96,105 @@ do
 
     T.MouseButton1Click:Connect(function()
         local ok, enabled = pcall(function()
-            if type(Rayfield.GetEnable) == "function" then
-                return Rayfield:GetEnable()
-            end
+            if type(Rayfield.GetEnable) == "function" then return Rayfield:GetEnable() end
             return false
         end)
         if ok then
             pcall(function()
-                if type(Rayfield.SetEnable) == "function" then
-                    Rayfield:SetEnable(not enabled)
-                end
+                if type(Rayfield.SetEnable) == "function" then Rayfield:SetEnable(not enabled) end
             end)
         end
     end)
 end
 
--- === Main tab: detection + purchase ===
+-- === Main tab: detection + purchase + Mutation dropdown ===
 do
     local MainTab = Window:CreateTab("Main", 4483362458)
     local MainSection = MainTab:CreateSection("Main")
 
-    -- Status label in UI
     local StatusLabel = MainTab:CreateLabel("Status: Idle", 4483362458, Color3.fromRGB(255,255,255), false)
     local function setStatus(text)
         pcall(function() StatusLabel:Set("Status: " .. tostring(text)) end)
         dbg("STATUS:", text)
     end
 
-    -- Debug helpers (silent unless DEBUG)
-    local function dumpTableKeys(t)
-        if type(t) ~= "table" then return tostring(t) end
-        local keys = {}
-        for k,_ in pairs(t) do table.insert(keys, tostring(k)) end
-        table.sort(keys)
-        return table.concat(keys, ", ")
-    end
-    local function dumpInstance(inst, depth, maxDepth)
-        if not DEBUG then return end
-        depth = depth or 0
-        maxDepth = maxDepth or 2
-        if not inst or not inst.IsA then return end
-        local indent = string.rep("  ", depth)
-        print(string.format("%s- %s (%s)", indent, tostring(inst.Name or "<no name>"), tostring(inst.ClassName or "Instance")))
-        if depth >= maxDepth then return end
-        for _, child in ipairs(inst:GetChildren()) do
-            dumpInstance(child, depth + 1, maxDepth)
-        end
-    end
-
-    -- Internal state
     local ReplicatedStorage = game:GetService("ReplicatedStorage")
     local Players = game:GetService("Players")
     local LocalPlayer = Players.LocalPlayer
     _G.UnHub_AutoBuyEgg = _G.UnHub_AutoBuyEgg or false
 
-    local LastEgg = nil -- { id=..., rarity=..., variety=..., source=... }
+    local LastEgg = nil
     local purchaseRemote = nil
     local requestEggRemote = nil
     local Conduit = nil
     local loopRunning = false
 
-    -- Locate purchase remote
-    local function getPurchaseRemote()
-        local ok, inst = pcall(function()
-            return ReplicatedStorage
-                :WaitForChild("Modules", 2)
-                :WaitForChild("Internals", 2)
-                :WaitForChild("Skeleton", 2)
-                :WaitForChild("Conduit", 2)
-                :WaitForChild("Instances", 2)
-        end)
-        if not ok or not inst then
-            setStatus("Remote path missing")
-            return nil
-        end
-        local rem = inst:FindFirstChild("_purchaseEgg")
-        if rem then
-            dbg("Found _purchaseEgg remote")
-        else
-            setStatus("_purchaseEgg not found")
-        end
-        return rem
-    end
+    -- Allowed rarities set (updated by dropdown)
+    local AllowedRarities = {} -- set: AllowedRarities["Normal"] = true
 
-    -- Locate request egg remote
-    local function getRequestEggRemote()
-        local ok, inst = pcall(function()
-            return ReplicatedStorage
-                :WaitForChild("Modules", 2)
-                :WaitForChild("Internals", 2)
-                :WaitForChild("Skeleton", 2)
-                :WaitForChild("Conduit", 2)
-                :WaitForChild("Instances", 2)
-        end)
-        if not ok or not inst then
-            setStatus("Remote path missing")
-            return nil
-        end
-        local rem = inst:FindFirstChild("_requestEgg")
-        if rem then
-            dbg("Found _requestEgg remote")
-        else
-            setStatus("_requestEgg not found")
-        end
-        return rem
-    end
+    -- Default dropdown options (Secret added)
+    local MUTATION_OPTIONS = { "Normal", "Golden", "Diamond", "Glitch", "Galaxy", "????", "Secret" }
 
-    -- Fire the request egg remote (spawn new egg)
-    local function requestNewEgg()
-        if not requestEggRemote then
-            requestEggRemote = getRequestEggRemote()
-        end
-        if not requestEggRemote then
-            setStatus("Request remote missing")
-            return false
-        end
-        local args = {
-            {
-                __raw = true,
-                data = {}
-            }
-        }
-        local ok, err = pcall(function()
-            if type(requestEggRemote.FireServer) == "function" then
-                requestEggRemote:FireServer(unpack(args))
-            elseif type(requestEggRemote.InvokeServer) == "function" then
-                requestEggRemote:InvokeServer(unpack(args))
-            else
-                error("No known fire method on request remote")
+    -- Helper: set AllowedRarities from list
+    local function setAllowedRarities(list)
+        AllowedRarities = {}
+        if type(list) == "table" then
+            for _, v in ipairs(list) do
+                if type(v) == "string" then AllowedRarities[tostring(v)] = true end
             end
+        end
+        dbg("Allowed rarities set:", table.concat(list or {}, ","))
+    end
+
+    -- Initialize default allowed rarities (include Secret by default)
+    setAllowedRarities({ "Normal", "Golden", "Diamond", "Glitch", "Galaxy", "????", "Secret" })
+
+    -- Remotes lookup
+    local function getInstancesFolder()
+        local ok, inst = pcall(function()
+            return ReplicatedStorage
+                :WaitForChild("Modules", 2)
+                :WaitForChild("Internals", 2)
+                :WaitForChild("Skeleton", 2)
+                :WaitForChild("Conduit", 2)
+                :WaitForChild("Instances", 2)
+        end)
+        if not ok or not inst then
+            setStatus("Remote path missing")
+            return nil
+        end
+        return inst
+    end
+
+    local function getPurchaseRemote()
+        if purchaseRemote then return purchaseRemote end
+        local inst = getInstancesFolder()
+        if not inst then return nil end
+        purchaseRemote = inst:FindFirstChild("_purchaseEgg")
+        if not purchaseRemote then setStatus("_purchaseEgg not found") end
+        return purchaseRemote
+    end
+
+    local function getRequestEggRemote()
+        if requestEggRemote then return requestEggRemote end
+        local inst = getInstancesFolder()
+        if not inst then return nil end
+        requestEggRemote = inst:FindFirstChild("_requestEgg")
+        if not requestEggRemote then setStatus("_requestEgg not found") end
+        return requestEggRemote
+    end
+
+    local function requestNewEgg()
+        local rem = getRequestEggRemote()
+        if not rem then return false end
+        local args = { { __raw = true, data = {} } }
+        local ok, err = pcall(function()
+            if type(rem.FireServer) == "function" then rem:FireServer(unpack(args))
+            elseif type(rem.InvokeServer) == "function" then rem:InvokeServer(unpack(args))
+            else error("No known fire method on request remote") end
         end)
         if ok then
             setStatus("Requested new egg")
-            dbg("Requested new egg via _requestEgg")
             return true
         else
             setStatus("Request new egg failed")
@@ -248,7 +203,7 @@ do
         end
     end
 
-    -- Attach Conduit listeners (capture payloads and source)
+    -- Conduit listeners (capture payloads)
     pcall(function()
         local ok, skeleton = pcall(function() return require(ReplicatedStorage.Modules.Internals.Skeleton) end)
         if ok and skeleton and skeleton.Conduit and type(skeleton.Conduit.Listen) == "function" then
@@ -258,34 +213,24 @@ do
                 if type(payload) == "table" then
                     local dataTable = (type(payload.data) == "table") and payload.data or payload
                     local capturedId = tostring(dataTable.id or dataTable.entity_id or dataTable.entity or dataTable.display_name or "")
-                    local capturedRarity = tostring(dataTable.rarity or "Basic")
+                    local capturedRarity = tostring(dataTable.rarity or "Normal")
                     local capturedVariety = tostring(dataTable.variety or "Normal")
-                    local capturedSource = dataTable.source or dataTable.display_name or payload.display_name or LastEgg and LastEgg.source or "Unknown"
-                    LastEgg = {
-                        id = capturedId,
-                        rarity = capturedRarity,
-                        variety = capturedVariety,
-                        source = tostring(capturedSource)
-                    }
-                    setStatus("Conduit _requestEgg captured (best-effort)")
-                    dbg("Conduit _requestEgg captured:", dumpTableKeys(dataTable))
+                    local capturedSource = tostring(dataTable.source or dataTable.display_name or payload.display_name or LastEgg and LastEgg.source or "")
+                    LastEgg = { id = capturedId, rarity = capturedRarity, variety = capturedVariety, source = capturedSource }
+                    setStatus("Conduit _requestEgg captured")
+                    dbg("_requestEgg payload keys:", (type(dataTable)=="table" and table.concat((function() local t={} for k,_ in pairs(dataTable) do table.insert(t,k) end return t end)(), ",") or tostring(dataTable)))
                 end
             end)
             Conduit.Listen("_purchaseEgg", function(payload)
                 if type(payload) == "table" then
                     local dataTable = (type(payload.data) == "table") and payload.data or payload
                     local capturedId = tostring(dataTable.id or dataTable.entity_id or dataTable.entity or dataTable.display_name or "")
-                    local capturedRarity = tostring(dataTable.rarity or "Basic")
+                    local capturedRarity = tostring(dataTable.rarity or "Normal")
                     local capturedVariety = tostring(dataTable.variety or "Normal")
-                    local capturedSource = dataTable.source or dataTable.display_name or payload.display_name or LastEgg and LastEgg.source or "Unknown"
-                    LastEgg = {
-                        id = capturedId,
-                        rarity = capturedRarity,
-                        variety = capturedVariety,
-                        source = tostring(capturedSource)
-                    }
-                    setStatus("Conduit _purchaseEgg captured (best-effort)")
-                    dbg("Conduit _purchaseEgg captured:", dumpTableKeys(dataTable))
+                    local capturedSource = tostring(dataTable.source or dataTable.display_name or payload.display_name or LastEgg and LastEgg.source or "")
+                    LastEgg = { id = capturedId, rarity = capturedRarity, variety = capturedVariety, source = capturedSource }
+                    setStatus("Conduit _purchaseEgg captured")
+                    dbg("_purchaseEgg payload keys:", (type(dataTable)=="table" and table.concat((function() local t={} for k,_ in pairs(dataTable) do table.insert(t,k) end return t end)(), ",") or tostring(dataTable)))
                 end
             end)
         else
@@ -293,7 +238,7 @@ do
         end
     end)
 
-    -- Extractor that reads TextLabel.Text values (Entity, Rarity, Variety)
+    -- Extractor
     local function extractFromEntity(entityInst)
         if not entityInst or not entityInst:IsA("Instance") then return nil end
         if entityInst:IsA("TextLabel") or entityInst:IsA("TextButton") or entityInst:IsA("TextBox") then
@@ -311,15 +256,10 @@ do
             id = id and trim(id) or nil
             rarity = rarity and trim(rarity) or nil
             variety = variety and trim(variety) or nil
-            if id and rarity and variety then
-                return { id = id, rarity = rarity, variety = variety }
-            end
-            if id or rarity or variety then
-                return { id = id or "", rarity = rarity or "Basic", variety = variety or "Normal" }
-            end
+            if id and rarity and variety then return { id = id, rarity = rarity, variety = variety } end
+            if id or rarity or variety then return { id = id or "", rarity = rarity or "Normal", variety = variety or "Normal" } end
             return nil
         end
-        -- Fallback: attributes / ValueBase children
         local function tryAttr(n)
             local ok, v = pcall(function() return entityInst:GetAttribute(n) end)
             if ok and v ~= nil then return tostring(v) end
@@ -336,9 +276,7 @@ do
         local id = tryAttr("id") or tryChildValue("id") or tryChildValue("Name")
         local rarity = tryAttr("rarity") or tryChildValue("rarity")
         local variety = tryAttr("variety") or tryChildValue("variety")
-        if id and rarity and variety then
-            return { id = tostring(id), rarity = tostring(rarity), variety = tostring(variety) }
-        end
+        if id and rarity and variety then return { id = tostring(id), rarity = tostring(rarity), variety = tostring(variety) } end
         return nil
     end
 
@@ -363,7 +301,6 @@ do
                         end
                     end
                 else
-                    -- fallback: check for any BillboardGui under this child
                     for _, c2 in ipairs(child:GetChildren()) do
                         if c2:IsA("BillboardGui") or string.find(string.lower(c2.Name or ""), "egg") then
                             local container = c2:FindFirstChild("Container") or c2:FindFirstChildWhichIsA("Frame") or c2:FindFirstChildWhichIsA("Folder")
@@ -388,7 +325,7 @@ do
         return false
     end
 
-    -- Build args (prefer source token when available)
+    -- Build args (prefer source token)
     local function buildArgs(egg)
         if not egg then return nil end
         local function normalizeToken(token)
@@ -401,71 +338,52 @@ do
             return simple or token
         end
         local preferred = nil
-        if egg.source and tostring(egg.source) ~= "" and tostring(egg.source):lower() ~= "unknown" then
-            preferred = normalizeToken(egg.source)
-        end
+        if egg.source and tostring(egg.source) ~= "" and tostring(egg.source):lower() ~= "unknown" then preferred = normalizeToken(egg.source) end
         if not preferred then preferred = normalizeToken(egg.id) end
         if not preferred then preferred = normalizeToken(egg.variety) or normalizeToken(egg.rarity) or "unknown" end
         local finalId = "entity_" .. tostring(preferred) .. "_egg"
-        return {
-            {
-                __raw = true,
-                data = {
-                    id = finalId,
-                    rarity = tostring(egg.rarity or "Basic"),
-                    variety = tostring(egg.variety or "Normal")
-                }
-            }
-        }
+        return { { __raw = true, data = { id = finalId, rarity = tostring(egg.rarity or "Normal"), variety = tostring(egg.variety or "Normal") } } }
     end
 
-    -- Debounce and purchase attempts
+    -- Check allowed rarity
+    local function isRarityAllowed(rarity)
+        if not rarity then return false end
+        return AllowedRarities[tostring(rarity)] == true
+    end
+
+    -- Purchase logic with rarity check; if not allowed, request new egg instead
     local lastFire = 0
     local FIRE_COOLDOWN = 1.5
 
     local function safeFirePurchase()
         if not purchaseRemote then purchaseRemote = getPurchaseRemote() end
-        if not purchaseRemote then
-            setStatus("Purchase remote missing")
-            return false
-        end
-        if not LastEgg then
-            setStatus("No egg data to purchase")
-            return false
-        end
-        if tick() - lastFire < FIRE_COOLDOWN then
-            setStatus("Cooldown active")
+        if not purchaseRemote then setStatus("Purchase remote missing"); return false end
+        if not LastEgg then setStatus("No egg data to purchase"); return false end
+        if tick() - lastFire < FIRE_COOLDOWN then setStatus("Cooldown active"); return false end
+
+        -- If rarity not allowed, request new egg and skip purchase
+        if not isRarityAllowed(LastEgg.rarity) then
+            setStatus(string.format("Rarity '%s' not allowed — requesting new egg", tostring(LastEgg.rarity)))
+            pcall(requestNewEgg)
             return false
         end
 
         local args = buildArgs(LastEgg)
-        if not args then
-            setStatus("Failed to build args")
-            return false
-        end
+        if not args then setStatus("Failed to build args"); return false end
 
         setStatus("Attempting purchase: " .. tostring(LastEgg.source or LastEgg.id or "unknown"))
         lastFire = tick()
-
-        -- Try FireServer(unpack(args)) first (common pattern)
         local ok, err = pcall(function()
-            if type(purchaseRemote.FireServer) == "function" then
-                purchaseRemote:FireServer(unpack(args))
-            elseif type(purchaseRemote.InvokeServer) == "function" then
-                purchaseRemote:InvokeServer(unpack(args))
-            else
-                error("No known fire method on purchase remote")
-            end
+            if type(purchaseRemote.FireServer) == "function" then purchaseRemote:FireServer(unpack(args))
+            elseif type(purchaseRemote.InvokeServer) == "function" then purchaseRemote:InvokeServer(unpack(args))
+            else error("No known fire method on purchase remote") end
         end)
 
         if ok then
             setStatus("Purchase fired")
             -- After successful purchase, request a new egg if Auto Buy is enabled
             if _G.UnHub_AutoBuyEgg then
-                -- small delay to allow server to process purchase before requesting new egg
-                task.delay(0.25, function()
-                    pcall(requestNewEgg)
-                end)
+                task.delay(0.25, function() pcall(requestNewEgg) end)
             end
             return true
         else
@@ -475,14 +393,13 @@ do
         end
     end
 
-    -- Loop runner (keeps lightweight)
+    -- Loop runner
     local function startAutoBuyLoop()
         if loopRunning then return end
         loopRunning = true
         setStatus("AutoBuy loop starting")
         spawn(function()
             while _G.UnHub_AutoBuyEgg do
-                -- prefer Conduit-captured data if available
                 if LastEgg and LastEgg.source and LastEgg.source ~= "" and LastEgg.source ~= "Unknown" then
                     pcall(safeFirePurchase)
                     task.wait(1.5)
@@ -497,7 +414,7 @@ do
         end)
     end
 
-    -- === Automatic detection: improved watchers (poll for readiness) ===
+    -- Automatic detection watchers (improved polling)
     do
         local childChildConns = {}
         local debounceTimestamps = {}
@@ -609,7 +526,7 @@ do
         setStatus("Workspace watchers attached (auto-scan enabled)")
     end
 
-    -- Auto Buy toggle only (Scan/Dump buttons removed)
+    -- UI: Auto Buy toggle
     MainTab:CreateToggle({
         Name = "Auto Buy Egg",
         CurrentValue = false,
@@ -625,6 +542,25 @@ do
                 setStatus("Toggle disabled: Auto Buy OFF")
             end
         end,
+    })
+
+    -- UI: Mutation dropdown (multi-select) — includes "Secret"
+    MainTab:CreateDropdown({
+        Name = "Mutation",
+        Options = MUTATION_OPTIONS,
+        CurrentOption = { "Normal", "Golden", "Diamond", "Glitch", "Galaxy", "????", "Secret" },
+        MultiSelect = true,
+        Flag = "MutationDropdown",
+        Callback = function(selected)
+            if type(selected) == "table" then
+                setAllowedRarities(selected)
+            elseif type(selected) == "string" then
+                setAllowedRarities({ selected })
+            else
+                setAllowedRarities({})
+            end
+            setStatus("Allowed mutations updated")
+        end
     })
 end
 
