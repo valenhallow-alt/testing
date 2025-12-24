@@ -95,25 +95,21 @@ do
     local function readTextOrValue(inst)
         if not inst then return nil end
 
-        -- Direct text properties
         if inst:IsA("TextLabel") or inst:IsA("TextBox") or inst:IsA("TextButton") then
             if type(inst.Text) == "string" and inst.Text ~= "" then
                 return inst.Text
             end
         end
 
-        -- ValueBase (StringValue, IntValue, NumberValue, BoolValue)
         if inst:IsA("ValueBase") and inst.Value ~= nil then
             return tostring(inst.Value)
         end
 
-        -- Some objects may store text in a child named "Text" or "Value"
         local ok, txt = pcall(function() return inst.Text end)
         if ok and type(txt) == "string" and txt ~= "" then return txt end
         local ok2, val = pcall(function() return inst.Value end)
         if ok2 and val ~= nil then return tostring(val) end
 
-        -- Try to find a child that is a TextLabel/TextBox/TextButton
         for _, c in ipairs(inst:GetChildren()) do
             if c:IsA("TextLabel") or c:IsA("TextBox") or c:IsA("TextButton") then
                 if type(c.Text) == "string" and c.Text ~= "" then
@@ -125,7 +121,6 @@ do
             end
         end
 
-        -- Try descendants as a last resort (shallow search)
         for _, d in ipairs(inst:GetDescendants()) do
             if d:IsA("TextLabel") or d:IsA("TextBox") or d:IsA("TextButton") then
                 if type(d.Text) == "string" and d.Text ~= "" then
@@ -146,7 +141,6 @@ do
         local lowerCandidates = {}
         for _, n in ipairs(nameCandidates) do lowerCandidates[#lowerCandidates+1] = string.lower(n) end
 
-        -- Check direct children first
         for _, child in ipairs(container:GetChildren()) do
             local lname = string.lower(child.Name or "")
             for _, cand in ipairs(lowerCandidates) do
@@ -157,7 +151,6 @@ do
             end
         end
 
-        -- Check descendants (shallow)
         for _, desc in ipairs(container:GetDescendants()) do
             local lname = string.lower(desc.Name or "")
             for _, cand in ipairs(lowerCandidates) do
@@ -168,7 +161,6 @@ do
             end
         end
 
-        -- If no named child found, try any child that yields readable text
         for _, child in ipairs(container:GetChildren()) do
             local v = readTextOrValue(child)
             if v and v ~= "" then
@@ -176,7 +168,6 @@ do
             end
         end
 
-        -- Finally try descendants for any readable text
         for _, desc in ipairs(container:GetDescendants()) do
             local v = readTextOrValue(desc)
             if v and v ~= "" then
@@ -196,10 +187,8 @@ do
                 if tag and tag:FindFirstChild("Container") then
                     local container = tag.Container
 
-                    -- Use robust field search with multiple candidate names
                     local price = findFieldValue(container, {"Price", "price", "Cost", "cost", "Amount"}) or "N/A"
                     local rarity = findFieldValue(container, {"Rarity", "rarity", "Tier", "tier"}) or "N/A"
-                    -- Prefer "Variety" label; do not rely on "Mutation" label anymore
                     local variety = findFieldValue(container, {"Variety", "variety", "Type", "type"}) or "N/A"
 
                     local eggName = tostring(child.Name or "Unknown")
@@ -273,10 +262,61 @@ do
         local requestEggRemote = getRemote("_requestEgg")
         local purchaseEggRemote = getRemote("_purchaseEgg")
 
+        -- Wait until no egg is detected or timeout (returns true if cleared)
+        local function waitUntilNoEgg(timeout)
+            local start = tick()
+            while (tick() - start) < (timeout or 20) do
+                local ok, eggs = pcall(function() return getAllSpawnedEggsInfo() end)
+                if ok and (not eggs or #eggs == 0) then
+                    return true
+                end
+                wait(0.4)
+            end
+            return false
+        end
+
+        -- Attempt to purchase the provided egg info (safe pcall)
+        local function attemptPurchaseFromInfo(eggInfo)
+            if not eggInfo or not purchaseEggRemote then return false end
+            local namePart = sanitizeNameForId(eggInfo.Name or "Unknown")
+            local rarityPart = tostring(eggInfo.Rarity or "Basic")
+            local varietyPart = tostring(eggInfo.Variety or "Glitch")
+            local idString = "entity_" .. namePart .. "_egg"
+            local ok, err = pcall(function()
+                local args = {
+                    {
+                        __raw = true,
+                        data = {
+                            id = idString,
+                            rarity = rarityPart,
+                            variety = varietyPart
+                        }
+                    }
+                }
+                purchaseEggRemote:FireServer(unpack(args))
+            end)
+            return ok
+        end
+
         -- Core loop
         local function autoSpawnBuyLoop()
             while autoEnabled do
-                -- 1) Request spawn
+                -- First: if an egg is currently detected, try to purchase it and wait until it's gone
+                local ok, eggsNow = pcall(function() return getAllSpawnedEggsInfo() end)
+                if ok and eggsNow and #eggsNow > 0 then
+                    -- Try to purchase the first detected egg
+                    pcall(function()
+                        attemptPurchaseFromInfo(eggsNow[1])
+                    end)
+                    -- Wait until egg is no longer detected (or timeout)
+                    waitUntilNoEgg(20)
+                    -- After waiting, continue to next cycle (do not request a new egg until cleared)
+                    -- small pause to avoid tight loop
+                    wait(0.6)
+                    continue
+                end
+
+                -- If no egg detected, it's safe to request a new spawn
                 if requestEggRemote then
                     pcall(function()
                         local args = {
@@ -289,44 +329,29 @@ do
                     end)
                 end
 
-                -- 2) Wait for detection (poll getAllSpawnedEggsInfo)
+                -- Wait for detection (poll getAllSpawnedEggsInfo)
                 local detectedEgg = nil
                 local startTime = tick()
                 local timeout = 12 -- seconds to wait for an egg to appear
                 while autoEnabled and (tick() - startTime) < timeout do
-                    local ok, eggs = pcall(function() return getAllSpawnedEggsInfo() end)
-                    if ok and eggs and #eggs > 0 then
+                    local ok2, eggs = pcall(function() return getAllSpawnedEggsInfo() end)
+                    if ok2 and eggs and #eggs > 0 then
                         detectedEgg = eggs[1] -- use first detected egg
                         break
                     end
                     wait(0.4)
                 end
 
-                -- 3) If detected, attempt purchase
+                -- If detected, attempt purchase and then wait until cleared before next request
                 if detectedEgg and purchaseEggRemote then
-                    -- Ensure we use the extracted fields directly (no debug strings)
-                    local namePart = sanitizeNameForId(detectedEgg.Name or "Unknown")
-                    local rarityPart = tostring(detectedEgg.Rarity or "Basic")
-                    local varietyPart = tostring(detectedEgg.Variety or "Glitch")
-
-                    local idString = "entity_" .. namePart .. "_egg"
-
                     pcall(function()
-                        local args = {
-                            {
-                                __raw = true,
-                                data = {
-                                    id = idString,
-                                    rarity = rarityPart,
-                                    variety = varietyPart
-                                }
-                            }
-                        }
-                        purchaseEggRemote:FireServer(unpack(args))
+                        attemptPurchaseFromInfo(detectedEgg)
                     end)
+                    -- Wait until egg disappears (or timeout) before next spawn request
+                    waitUntilNoEgg(20)
                 end
 
-                -- 4) Small delay before next cycle to avoid spamming
+                -- Small delay before next cycle to avoid spamming
                 local cycleDelay = 1.0
                 local waited = 0
                 while autoEnabled and waited < cycleDelay do
