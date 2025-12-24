@@ -1,8 +1,9 @@
--- Safe, full UnHub Egg Buyer script
+-- Safe, full UnHub Egg Buyer script (complete)
 -- 1) guarded Rayfield loader
 -- 2) safe UI bootstrap
 -- 3) Conduit listeners + targeted workspace Eggtag detection
 -- 4) debug UI and manual scan
+-- 5) robust purchase attempts with detailed logging
 
 -- Destroy previous Rayfield instance if present
 if _G.RayfieldInstance then
@@ -391,37 +392,156 @@ do
         }
     end
 
+    -- Debounce and purchase attempts
     local lastFire = 0
     local FIRE_COOLDOWN = 1.5
+
+    -- Robust safeFirePurchase: tries multiple call patterns and logs results
     local function safeFirePurchase()
-        if not purchaseRemote then purchaseRemote = getPurchaseRemote() end
+        -- ensure we have the remote reference
+        if not purchaseRemote then
+            purchaseRemote = getPurchaseRemote()
+        end
         if not purchaseRemote then
             setStatus("Purchase remote missing")
             return false
         end
+
         if not LastEgg then
             setStatus("No egg data to purchase")
             return false
         end
+
         if tick() - lastFire < FIRE_COOLDOWN then
             setStatus("Cooldown active, skipping fire")
             return false
         end
-        lastFire = tick()
+
+        -- Build args exactly as required
         local args = buildArgs(LastEgg)
         if not args then
             setStatus("Failed to build args")
             return false
         end
-        local ok, err = pcall(function() purchaseRemote:FireServer(unpack(args)) end)
-        if ok then
-            setStatus(string.format("Fired purchase for id=%s rarity=%s variety=%s (source=%s)", LastEgg.id, LastEgg.rarity, LastEgg.variety, tostring(LastEgg.source)))
-            print(string.format("[UnHub] Fired purchase for id=%s rarity=%s variety=%s (source=%s)", LastEgg.id, LastEgg.rarity, LastEgg.variety, tostring(LastEgg.source)))
-        else
-            setStatus("FireServer failed; see console")
-            warn("[UnHub] safeFirePurchase error:", err)
+
+        -- Debug: show the payload we will send
+        local function argsToString(a)
+            if type(a) ~= "table" then return tostring(a) end
+            local ok, s = pcall(function() return game:GetService("HttpService"):JSONEncode(a) end)
+            if ok then return s end
+            return tostring(a)
         end
-        return ok
+        local payloadStr = argsToString(args)
+        setStatus("Attempting purchase: " .. tostring(LastEgg.id))
+        print("[UnHub] Attempting purchase with payload:", payloadStr)
+
+        -- Debounce
+        lastFire = tick()
+
+        -- Try a sequence of safe call methods and log results
+        local attempts = {}
+
+        -- 1) If it's a RemoteEvent, try FireServer(unpack(args))
+        if purchaseRemote.IsA and purchaseRemote:IsA("RemoteEvent") then
+            local ok, err = pcall(function() purchaseRemote:FireServer(unpack(args)) end)
+            table.insert(attempts, {method = "RemoteEvent:FireServer(unpack(args))", ok = ok, err = err})
+            if ok then
+                setStatus("Fired RemoteEvent:FireServer(unpack(args))")
+                print("[UnHub] purchase attempt succeeded via RemoteEvent:FireServer")
+                return true
+            end
+        end
+
+        -- 2) If it's a RemoteFunction, try InvokeServer(unpack(args))
+        if purchaseRemote.IsA and purchaseRemote:IsA("RemoteFunction") then
+            local ok, res = pcall(function() return purchaseRemote:InvokeServer(unpack(args)) end)
+            table.insert(attempts, {method = "RemoteFunction:InvokeServer(unpack(args))", ok = ok, res = res})
+            if ok then
+                setStatus("Invoked RemoteFunction:InvokeServer(unpack(args))")
+                print("[UnHub] purchase attempt succeeded via RemoteFunction:InvokeServer", res)
+                return true
+            end
+        end
+
+        -- 3) Try FireServer with the single table argument (args[1])
+        do
+            local ok, err = pcall(function()
+                if type(purchaseRemote.FireServer) == "function" then
+                    purchaseRemote:FireServer(args[1])
+                else
+                    error("FireServer not a function on remote")
+                end
+            end)
+            table.insert(attempts, {method = "RemoteEvent:FireServer(args[1])", ok = ok, err = err})
+            if ok then
+                setStatus("Fired RemoteEvent:FireServer(args[1])")
+                print("[UnHub] purchase attempt succeeded via FireServer(args[1])")
+                return true
+            end
+        end
+
+        -- 4) Try FireServer with the whole args table (no unpack)
+        do
+            local ok, err = pcall(function()
+                if type(purchaseRemote.FireServer) == "function" then
+                    purchaseRemote:FireServer(args)
+                else
+                    error("FireServer not a function on remote")
+                end
+            end)
+            table.insert(attempts, {method = "RemoteEvent:FireServer(args)", ok = ok, err = err})
+            if ok then
+                setStatus("Fired RemoteEvent:FireServer(args)")
+                print("[UnHub] purchase attempt succeeded via FireServer(args)")
+                return true
+            end
+        end
+
+        -- 5) Try InvokeServer with args[1] if InvokeServer exists
+        do
+            local ok, res = pcall(function()
+                if type(purchaseRemote.InvokeServer) == "function" then
+                    return purchaseRemote:InvokeServer(args[1])
+                else
+                    error("InvokeServer not a function on remote")
+                end
+            end)
+            table.insert(attempts, {method = "RemoteFunction:InvokeServer(args[1])", ok = ok, res = res})
+            if ok then
+                setStatus("Invoked RemoteFunction:InvokeServer(args[1])")
+                print("[UnHub] purchase attempt succeeded via InvokeServer(args[1])")
+                return true
+            end
+        end
+
+        -- 6) Last resort: try calling a FireServer-like method generically
+        do
+            local ok, err = pcall(function()
+                if type(purchaseRemote.Fire) == "function" then
+                    purchaseRemote:Fire(unpack(args))
+                elseif type(purchaseRemote.FireServer) == "function" then
+                    purchaseRemote:FireServer(unpack(args))
+                else
+                    error("No known fire method on remote")
+                end
+            end)
+            table.insert(attempts, {method = "Generic fire attempt", ok = ok, err = err})
+            if ok then
+                setStatus("Generic fire attempt succeeded")
+                print("[UnHub] purchase attempt succeeded via generic fire")
+                return true
+            end
+        end
+
+        -- If we reach here, all attempts failed. Print a detailed log of attempts.
+        setStatus("All purchase attempts failed; see console")
+        print("[UnHub] Purchase attempts summary:")
+        for i, a in ipairs(attempts) do
+            print(string.format("  %d) %s -> ok=%s, result=%s", i, tostring(a.method), tostring(a.ok), tostring(a.err or a.res)))
+        end
+
+        print("[UnHub] If all attempts failed, confirm the remote type and whether the server expects additional parameters or a different payload shape.")
+        return false
     end
 
     -- Loop runner
