@@ -82,106 +82,189 @@ do
     end)
 end
 
--- === Added: Main tab with Auto Buy Egg toggle ===
+-- === Egg Info UI (Rayfield) ===
+local EggTab = Window:CreateTab("Egg Info", 4483362458)
+
+-- Use a paragraph so we can update multiple lines easily
+local EggParagraph = EggTab:CreateParagraph({
+    Title = "Spawned Egg",
+    Content = "Price: -\nVariety: -\nRarity: -\nMutation: -"
+})
+
+-- Helper: try to build a lookup table from ReplicatedStorage metadata if present
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local EggMetaLookup = nil
 do
-    -- Create "Main" tab (use an icon id or 0 for none)
-    local MainTab = Window:CreateTab("Main", 4483362458)
-    local MainSection = MainTab:CreateSection("Main")
-
-    -- Global flag used by the toggle loop
-    _G.UnHub_AutoBuyEgg = _G.UnHub_AutoBuyEgg or false
-
-    -- Helper: safe proximity prompt fire (works in many exploit environments)
-    local function tryFireProximityPrompt(prompt)
-        local ok, err = pcall(function()
-            if typeof(fireproximityprompt) == "function" then
-                fireproximityprompt(prompt)
-            elseif prompt:IsA("ProximityPrompt") and prompt.Parent and prompt.Parent:FindFirstChildOfClass("ClickDetector") then
-                -- fallback attempt: click detector (not guaranteed)
-                local cd = prompt.Parent:FindFirstChildOfClass("ClickDetector")
-                if cd and typeof(cd.MouseClick) == "RBXScriptSignal" then
-                    cd:FireAllClients()
+    -- Many games store egg metadata in ReplicatedStorage.Assets or a ModuleScript.
+    -- Try a few common locations safely.
+    pcall(function()
+        local assets = ReplicatedStorage:FindFirstChild("Assets")
+        if assets then
+            local eggsFolder = assets:FindFirstChild("Eggs")
+            if eggsFolder and eggsFolder:IsA("Folder") then
+                EggMetaLookup = {}
+                for _, child in ipairs(eggsFolder:GetChildren()) do
+                    -- child.Name may be the entity id or model name; store a minimal record
+                    -- Attempt to read common metadata values if present as attributes or children
+                    local meta = {}
+                    meta.display_name = child:GetAttribute("display_name") or child.Name
+                    meta.base_price = child:GetAttribute("base_price") or child:GetAttribute("price")
+                    meta.rarity = child:GetAttribute("rarity")
+                    -- If the child is a ModuleScript, try requiring it for richer data
+                    if child:IsA("ModuleScript") then
+                        local ok, data = pcall(require, child)
+                        if ok and type(data) == "table" then
+                            for k, v in pairs(data) do meta[k] = v end
+                        end
+                    end
+                    EggMetaLookup[child.Name] = meta
                 end
             end
-        end)
-        return ok
+        end
+    end)
+
+    -- Try to require a module that contains egg definitions (some games use a ModuleScript)
+    pcall(function()
+        if not EggMetaLookup then
+            local possible = ReplicatedStorage:FindFirstChild("EggDefinitions") or ReplicatedStorage:FindFirstChild("EggsData") or (ReplicatedStorage:FindFirstChild("Configuration") and ReplicatedStorage.Configuration:FindFirstChild("Eggs"))
+            if possible and possible:IsA("ModuleScript") then
+                local ok, data = pcall(require, possible)
+                if ok and type(data) == "table" then
+                    EggMetaLookup = data
+                end
+            end
+        end
+    end)
+end
+
+-- Utility: format and update the paragraph
+local function updateParagraph(price, variety, rarity, mutation)
+    price = price or "Unknown"
+    variety = variety or "Unknown"
+    rarity = rarity or "Unknown"
+    mutation = mutation or "Unknown"
+    local content = string.format("Price: %s\nVariety: %s\nRarity: %s\nMutation: %s", tostring(price), tostring(variety), tostring(rarity), tostring(mutation))
+    pcall(function() EggParagraph:Set({Title = "Spawned Egg", Content = content}) end)
+end
+
+-- Try to extract metadata from a model instance
+local function readEggFromInstance(inst)
+    if not inst or not inst:IsA("Model") then return nil end
+
+    -- Common attribute names used by many games
+    local entity_id = inst:GetAttribute("entity_id") or inst:GetAttribute("EntityId") or inst:GetAttribute("id") or inst.Name
+    local price = inst:GetAttribute("price") or inst:GetAttribute("base_price")
+    local rarity = inst:GetAttribute("rarity")
+    local mutation = inst:GetAttribute("mutation") or inst:GetAttribute("mutated")
+    local variety = inst:GetAttribute("variety") or inst:GetAttribute("variant") or inst.Name
+
+    -- If some fields are missing but we have an entity_id, try lookup table
+    if (not price or not rarity or not variety) and entity_id and EggMetaLookup and EggMetaLookup[entity_id] then
+        local meta = EggMetaLookup[entity_id]
+        price = price or meta.base_price or meta.price
+        rarity = rarity or meta.rarity
+        variety = variety or meta.display_name or meta.entity_id or meta.name
     end
 
-    -- Create the Auto Buy Egg toggle
-    local AutoBuyToggle = MainTab:CreateToggle({
-        Name = "Auto Buy Egg",
-        CurrentValue = false,
-        Flag = "AutoBuyEgg",
-        Callback = function(Value)
-            _G.UnHub_AutoBuyEgg = Value
+    -- Final fallback: try to find child values (StringValue/IntValue/NumberValue/BoolValue) inside the model
+    if not price then
+        local v = inst:FindFirstChild("Price") or inst:FindFirstChild("BasePrice") or inst:FindFirstChild("price")
+        if v and (v:IsA("IntValue") or v:IsA("NumberValue") or v:IsA("StringValue")) then
+            price = v.Value
+        end
+    end
+    if not rarity then
+        local v = inst:FindFirstChild("Rarity") or inst:FindFirstChild("rarity")
+        if v and v:IsA("StringValue") then rarity = v.Value end
+    end
+    if not mutation then
+        local v = inst:FindFirstChild("Mutation") or inst:FindFirstChild("Mutated") or inst:FindFirstChild("mutation")
+        if v and (v:IsA("BoolValue") or v:IsA("StringValue") or v:IsA("IntValue") or v:IsA("NumberValue")) then mutation = v.Value end
+    end
 
-            if Value then
-                -- Start a loop that attempts to buy eggs while enabled
-                spawn(function()
-                    while _G.UnHub_AutoBuyEgg do
-                        pcall(function()
-                            -- Example strategies (attempt common remote names, then proximity prompts)
-                            local success = false
+    -- Normalize mutation to readable string
+    if type(mutation) == "boolean" then
+        mutation = mutation and "Yes" or "No"
+    end
 
-                            -- 1) Try common RemoteEvent/RemoteFunction names in ReplicatedStorage
-                            local rs = game:GetService("ReplicatedStorage")
-                            if rs then
-                                local candidates = {"BuyEgg", "PurchaseEgg", "EggShop", "BuyItem", "PurchaseItem"}
-                                for _, name in ipairs(candidates) do
-                                    local rem = rs:FindFirstChild(name)
-                                    if rem and rem:IsA("RemoteEvent") then
-                                        pcall(function() rem:FireServer() end)
-                                        success = true
-                                        break
-                                    elseif rem and rem:IsA("RemoteFunction") then
-                                        pcall(function() rem:InvokeServer() end)
-                                        success = true
-                                        break
-                                    end
-                                end
-                            end
-
-                            -- 2) Try workspace ProximityPrompts that mention "egg" or "shop"
-                            if not success then
-                                for _, obj in ipairs(workspace:GetDescendants()) do
-                                    if obj:IsA("ProximityPrompt") then
-                                        local name = (obj.Name or ""):lower()
-                                        local parentName = (obj.Parent and obj.Parent.Name or ""):lower()
-                                        if name:find("egg") or parentName:find("egg") or name:find("shop") or parentName:find("shop") then
-                                            tryFireProximityPrompt(obj)
-                                            success = true
-                                            break
-                                        end
-                                    end
-                                end
-                            end
-
-                            -- 3) Try to find a ClickDetector with "egg" in parent name
-                            if not success then
-                                for _, obj in ipairs(workspace:GetDescendants()) do
-                                    if obj:IsA("ClickDetector") then
-                                        local pname = (obj.Parent and obj.Parent.Name or ""):lower()
-                                        if pname:find("egg") or pname:find("shop") then
-                                            pcall(function() obj:FireAllClients() end)
-                                            success = true
-                                            break
-                                        end
-                                    end
-                                end
-                            end
-                        end)
-
-                        -- Wait a short interval before trying again
-                        wait(1)
-                    end
-                end)
-            end
-        end,
-    })
+    return {
+        price = price,
+        variety = variety,
+        rarity = rarity,
+        mutation = mutation,
+        entity_id = entity_id
+    }
 end
--- === End added Main tab ===
+
+-- Heuristic: find the "currently spawned egg" in workspace
+local function findSpawnedEgg()
+    -- Common places to look: workspace.Entities, workspace.SpawnedEggs, workspace.Eggs, workspace.Plots
+    local searchRoots = {
+        workspace:FindFirstChild("Entities"),
+        workspace:FindFirstChild("SpawnedEggs"),
+        workspace:FindFirstChild("Eggs"),
+        workspace:FindFirstChild("Plots"),
+        workspace
+    }
+
+    for _, root in ipairs(searchRoots) do
+        if root and root:IsA("Instance") then
+            for _, inst in ipairs(root:GetDescendants()) do
+                if inst:IsA("Model") then
+                    -- Heuristics: model has attribute entity_id, or name contains "Egg", or has a child named "UUID" or "Entity"
+                    if inst:GetAttribute("entity_id") or inst:GetAttribute("EntityId") or inst.Name:lower():find("egg") or inst:FindFirstChild("UUID") or inst:FindFirstChild("EntityId") then
+                        return inst
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+-- Watch for changes: update when a new egg appears or attributes change
+local currentEgg = nil
+local function refresh()
+    local eggInst = findSpawnedEgg()
+    if eggInst ~= currentEgg then
+        currentEgg = eggInst
+    end
+    if currentEgg then
+        local info = readEggFromInstance(currentEgg)
+        if info then
+            updateParagraph(info.price, info.variety, info.rarity, info.mutation)
+            return
+        end
+    end
+    updateParagraph(nil, nil, nil, nil)
+end
+
+-- Initial refresh
+refresh()
+
+-- Connect to workspace descendant added/removed to update quickly
+workspace.DescendantAdded:Connect(function(desc)
+    -- small debounce: only act on Models or children that hint at eggs
+    if desc:IsA("Model") or desc.Name:match("Egg") or desc.Name:match("UUID") or desc.Name:match("EntityId") then
+        wait(0.1)
+        pcall(refresh)
+    end
+end)
+workspace.DescendantRemoving:Connect(function(desc)
+    if desc == currentEgg then
+        wait(0.1)
+        pcall(refresh)
+    end
+end)
+
+-- Also poll periodically as a fallback (in case attributes are set after spawn)
+spawn(function()
+    while true do
+        pcall(refresh)
+        wait(2)
+    end
+end)
+-- === End Egg Info UI ===
 
 -- Load (or create) configuration so Rayfield can restore UI state if needed
 pcall(function() Rayfield:LoadConfiguration() end)
-
-
