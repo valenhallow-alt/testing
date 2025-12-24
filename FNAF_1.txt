@@ -1,10 +1,10 @@
--- UnHub Egg Buyer — streamlined with Mutation dropdown (Secret added)
+-- UnHub Egg Buyer — final full script
 -- Features:
 -- * Guarded Rayfield loader
 -- * Auto-scan watchers (polling)
 -- * Conduit listeners
 -- * Auto Buy toggle
--- * Mutation dropdown (multi-select) to control allowed rarities (includes "Secret")
+-- * Mutation dropdown (multi-select) using Rayfield API (MultipleOptions = true)
 -- * If rarity not allowed, auto-spawn new egg via _requestEgg remote
 -- * Minimal console output controlled by DEBUG
 
@@ -132,7 +132,7 @@ do
     -- Allowed rarities set (updated by dropdown)
     local AllowedRarities = {} -- set: AllowedRarities["Normal"] = true
 
-    -- Default dropdown options (Secret added)
+    -- Dropdown options (includes Secret)
     local MUTATION_OPTIONS = { "Normal", "Golden", "Diamond", "Glitch", "Galaxy", "????", "Secret" }
 
     -- Helper: set AllowedRarities from list
@@ -146,8 +146,8 @@ do
         dbg("Allowed rarities set:", table.concat(list or {}, ","))
     end
 
-    -- Initialize default allowed rarities (include Secret by default)
-    setAllowedRarities({ "Normal", "Golden", "Diamond", "Glitch", "Galaxy", "????", "Secret" })
+    -- Initialize default allowed rarities (all selected by default)
+    setAllowedRarities(MUTATION_OPTIONS)
 
     -- Remotes lookup
     local function getInstancesFolder()
@@ -544,24 +544,66 @@ do
         end,
     })
 
-    -- UI: Mutation dropdown (multi-select) — includes "Secret"
-    MainTab:CreateDropdown({
+    -- UI: Mutation dropdown (multi-select) using Rayfield API
+    local Dropdown = MainTab:CreateDropdown({
         Name = "Mutation",
         Options = MUTATION_OPTIONS,
-        CurrentOption = { "Normal", "Golden", "Diamond", "Glitch", "Galaxy", "????", "Secret" },
-        MultiSelect = true,
+        CurrentOption = MUTATION_OPTIONS, -- default: all selected
+        MultipleOptions = true,           -- enable multi-select
         Flag = "MutationDropdown",
-        Callback = function(selected)
-            if type(selected) == "table" then
-                setAllowedRarities(selected)
-            elseif type(selected) == "string" then
-                setAllowedRarities({ selected })
+        Callback = function(selectedOptions)
+            if type(selectedOptions) == "table" then
+                setAllowedRarities(selectedOptions)
+                setStatus("Allowed mutations updated")
+            else
+                setAllowedRarities({})
+                setStatus("Allowed mutations cleared")
+            end
+        end,
+    })
+
+    -- Select All / Clear buttons using Dropdown:Set
+    MainTab:CreateButton({
+        Name = "Select All Mutations",
+        Callback = function()
+            if Dropdown and type(Dropdown.Set) == "function" then
+                pcall(function() Dropdown:Set(MUTATION_OPTIONS) end)
+            else
+                setAllowedRarities(MUTATION_OPTIONS)
+            end
+            setStatus("All mutations selected")
+        end
+    })
+
+    MainTab:CreateButton({
+        Name = "Clear All Mutations",
+        Callback = function()
+            if Dropdown and type(Dropdown.Set) == "function" then
+                pcall(function() Dropdown:Set({}) end)
             else
                 setAllowedRarities({})
             end
-            setStatus("Allowed mutations updated")
+            setStatus("All mutations cleared")
         end
     })
+
+    -- Initialize AllowedRarities from CurrentOption (if Rayfield saved config restored it)
+    task.defer(function()
+        task.wait(0.05)
+        local initial = MUTATION_OPTIONS
+        if Dropdown and type(Dropdown.Get) == "function" then
+            local ok, val = pcall(function() return Dropdown:Get() end)
+            if ok and type(val) == "table" and #val > 0 then initial = val end
+        else
+            -- try reading saved flag via Window.Flags if available
+            pcall(function()
+                if Window.Flags and Window.Flags.MutationDropdown and type(Window.Flags.MutationDropdown) == "table" then
+                    initial = Window.Flags.MutationDropdown
+                end
+            end)
+        end
+        setAllowedRarities(initial)
+    end)
 end
 
 -- Load configuration
