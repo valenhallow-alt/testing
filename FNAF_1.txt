@@ -1,4 +1,10 @@
--- Safely destroy any previously created Rayfield UI (put this before loading the library)
+-- Safe, full UnHub Egg Buyer script
+-- 1) guarded Rayfield loader
+-- 2) safe UI bootstrap
+-- 3) Conduit listeners + targeted workspace Eggtag detection
+-- 4) debug UI and manual scan
+
+-- Destroy previous Rayfield instance if present
 if _G.RayfieldInstance then
     pcall(function()
         if type(_G.RayfieldInstance.Destroy) == "function" then
@@ -8,78 +14,108 @@ if _G.RayfieldInstance then
     _G.RayfieldInstance = nil
 end
 
--- Load Rayfield library and create a minimal, blank window
-local Rayfield = loadstring(game:HttpGet('https://raw.githubusercontent.com/UnHub-LEGO/Scripts/refs/heads/main/Rayfield%20Library'))()
-_G.RayfieldInstance = Rayfield
+-- Safe Rayfield loader
+local Rayfield = nil
+do
+    local success, libOrErr = pcall(function()
+        local raw = game:HttpGet('https://raw.githubusercontent.com/UnHub-LEGO/Scripts/refs/heads/main/Rayfield%20Library')
+        if type(raw) ~= "string" or raw == "" then error("empty library response") end
+        local fn, loadErr = loadstring(raw)
+        if not fn then error("loadstring failed: "..tostring(loadErr)) end
+        local ok, lib = pcall(fn)
+        if not ok then error("executing library failed: "..tostring(lib)) end
+        return lib
+    end)
+    if success and type(libOrErr) == "table" then
+        Rayfield = libOrErr
+        _G.RayfieldInstance = Rayfield
+        print("[UnHub] Rayfield loaded successfully")
+    else
+        warn("[UnHub] Rayfield failed to load:", libOrErr)
+        Rayfield = nil
+    end
+end
 
-local Window = Rayfield:CreateWindow({
-    Name = "UnHub (Egg Buyer)",
-    FileName = "UnHub_EggBuyer",
-    Icon = 0,
-    Theme = "DarkBlue",
-    ToggleUIKeybind = "H",
-    ConfigurationSaving = {
-        Enabled = true,
-        FolderName = nil,
-        FileName = "UnHub_EggBuyer"
-    },
-    Discord = {
-        Enabled = false,
-        Invite = "",
-        RememberJoins = true
-    },
-    KeySystem = false,
-    KeySettings = {
-        Title = "UnHub",
-        Subtitle = "Key",
-        Note = "",
-        FileName = "Key",
-        SaveKey = false,
-        GrabKeyFromSite = false,
-        Key = {}
-    }
-})
+-- Abort if Rayfield unavailable (prevents nil calls)
+if not Rayfield or type(Rayfield) ~= "table" or type(Rayfield.CreateWindow) ~= "function" then
+    warn("[UnHub] Rayfield unavailable — aborting. Check HTTP access and library URL.")
+    return
+end
 
--- Minimal UI toggle button (draggable) to show/hide Rayfield
+-- Create Rayfield window safely
+local okWindow, Window = pcall(function()
+    return Rayfield:CreateWindow({
+        Name = "UnHub (Egg Buyer)",
+        FileName = "UnHub_EggBuyer",
+        Icon = 0,
+        Theme = "DarkBlue",
+        ToggleUIKeybind = "H",
+        ConfigurationSaving = { Enabled = true, FolderName = nil, FileName = "UnHub_EggBuyer" },
+        Discord = { Enabled = false, Invite = "", RememberJoins = true },
+        KeySystem = false,
+        KeySettings = { Title = "UnHub", Subtitle = "Key", Note = "", FileName = "Key", SaveKey = false, GrabKeyFromSite = false, Key = {} }
+    })
+end)
+
+if not okWindow or not Window then
+    warn("[UnHub] CreateWindow failed:", Window)
+    return
+end
+
+-- Resolve parent GUI safely for the small toggle button
+local parentGui = nil
+pcall(function()
+    if type(Rayfield.GetParent) == "function" then
+        local p = Rayfield:GetParent()
+        if p and p.Parent and p.Parent:IsA("Instance") then
+            parentGui = p.Parent
+        end
+    end
+end)
+if not parentGui or not parentGui:IsA("Instance") then
+    parentGui = game:GetService("CoreGui")
+end
+
+-- Minimal UI toggle button (guarded)
 do
     local ST = Instance.new("ScreenGui")
-    local T = Instance.new("ImageButton")
-    local Corner = Instance.new("UICorner")
-
     ST.Name = "Toggle UnHub"
-    local parentGui = nil
-    pcall(function()
-        parentGui = Rayfield:GetParent() and Rayfield:GetParent().Parent
-    end)
-    if not parentGui or not parentGui:IsA("Instance") then
-        parentGui = game:GetService("CoreGui")
-    end
-    ST.Parent = parentGui
     ST.ResetOnSpawn = false
+    ST.Parent = parentGui
 
+    local T = Instance.new("ImageButton")
     T.Name = "UnHubToggle"
     T.Parent = ST
-    T.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-    T.Position = UDim2.new(0, 30, 0.08, 0)
-    T.Size = UDim2.new(0, 50, 0, 50)
+    T.BackgroundColor3 = Color3.fromRGB(0,0,0)
+    T.Position = UDim2.new(0,30,0.08,0)
+    T.Size = UDim2.new(0,50,0,50)
     T.Image = "rbxassetid://112045743772867"
     T.Active = true
     T.Draggable = true
     T.AutoButtonColor = true
 
-    Corner.Name = "Corner"
+    local Corner = Instance.new("UICorner")
     Corner.Parent = T
-    Corner.CornerRadius = UDim.new(0, 8)
+    Corner.CornerRadius = UDim.new(0,8)
 
     T.MouseButton1Click:Connect(function()
-        local ok, enabled = pcall(function() return Rayfield:GetEnable() end)
+        local ok, enabled = pcall(function()
+            if type(Rayfield.GetEnable) == "function" then
+                return Rayfield:GetEnable()
+            end
+            return false
+        end)
         if ok then
-            pcall(function() Rayfield:SetEnable(not enabled) end)
+            pcall(function()
+                if type(Rayfield.SetEnable) == "function" then
+                    Rayfield:SetEnable(not enabled)
+                end
+            end)
         end
     end)
 end
 
--- === Main tab with targeted detection and debug UI ===
+-- === Main tab: targeted detection + safe purchase ===
 do
     local MainTab = Window:CreateTab("Main", 4483362458)
     local MainSection = MainTab:CreateSection("Main")
@@ -91,7 +127,7 @@ do
         print("[UnHub] " .. tostring(text))
     end
 
-    -- Debug utilities
+    -- Debug helpers
     local function dumpTableKeys(t)
         if type(t) ~= "table" then return tostring(t) end
         local keys = {}
@@ -99,11 +135,10 @@ do
         table.sort(keys)
         return table.concat(keys, ", ")
     end
-
     local function dumpInstance(inst, depth, maxDepth)
         depth = depth or 0
         maxDepth = maxDepth or 2
-        if not inst or not inst:IsA then return end
+        if not inst or not inst.IsA then return end
         local indent = string.rep("  ", depth)
         print(string.format("%s- %s (%s)", indent, tostring(inst.Name or "<no name>"), tostring(inst.ClassName or "Instance")))
         if depth >= maxDepth then return end
@@ -148,7 +183,7 @@ do
         return rem
     end
 
-    -- Attach Conduit listeners and dump raw payloads for debugging
+    -- Attach Conduit listeners and dump raw payloads for debugging (if available)
     pcall(function()
         local ok, skeleton = pcall(function() return require(ReplicatedStorage.Modules.Internals.Skeleton) end)
         if ok and skeleton and skeleton.Conduit and type(skeleton.Conduit.Listen) == "function" then
