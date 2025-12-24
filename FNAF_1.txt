@@ -47,8 +47,6 @@ do
     local Corner = Instance.new("UICorner")
 
     ST.Name = "Toggle UnHub"
-    -- Parent to the same UI context Rayfield uses so it appears alongside the Rayfield UI
-    -- If Rayfield:GetParent() or its parent is nil, fall back to CoreGui
     local parentGui = nil
     pcall(function()
         parentGui = Rayfield:GetParent() and Rayfield:GetParent().Parent
@@ -64,7 +62,7 @@ do
     T.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
     T.Position = UDim2.new(0, 30, 0.08, 0)
     T.Size = UDim2.new(0, 50, 0, 50)
-    T.Image = "rbxassetid://112045743772867" -- replace with your decal id if desired
+    T.Image = "rbxassetid://112045743772867"
     T.Active = true
     T.Draggable = true
     T.AutoButtonColor = true
@@ -73,7 +71,6 @@ do
     Corner.Parent = T
     Corner.CornerRadius = UDim.new(0, 8)
 
-    -- Toggle Rayfield visibility on click
     T.MouseButton1Click:Connect(function()
         local ok, enabled = pcall(function() return Rayfield:GetEnable() end)
         if ok then
@@ -109,12 +106,12 @@ local function extractText(obj)
             elseif obj:IsA("StringValue") or obj:IsA("IntValue") or obj:IsA("NumberValue") or obj:IsA("BoolValue") then
                 return tostring(obj.Value)
             elseif obj:IsA("Frame") or obj:IsA("ImageLabel") or obj:IsA("ImageButton") then
-                -- try to find a child TextLabel inside
-                local child = obj:FindFirstChildWhichIsA and obj:FindFirstChildWhichIsA("TextLabel")
-                if child then return tostring(child.Text) end
+                if obj.FindFirstChildWhichIsA then
+                    local child = obj:FindFirstChildWhichIsA("TextLabel")
+                    if child then return tostring(child.Text) end
+                end
             end
         end
-        -- fallback: try tostring
         return tostring(obj)
     end)
     if ok then return result end
@@ -126,9 +123,11 @@ local function findEggTag()
     for _, child in pairs(workspace:GetChildren()) do
         if child and child:FindFirstChild("Eggtag") then
             local tag = child:FindFirstChild("Eggtag")
-            if tag and (tag:IsA("BillboardGui") or tag.ClassName == "BillboardGui") then
+            -- fixed operator precedence: ensure both checks are grouped
+            if tag and (tag:IsA and (tag:IsA("BillboardGui") or tag.ClassName == "BillboardGui")) then
                 return child, tag
             end
+            -- return even if not a BillboardGui, but present
             return child, tag
         end
     end
@@ -150,16 +149,15 @@ local function readStat(container, name)
         local txt = extractText(alt)
         if txt and txt ~= "" then return txt end
     end
-    -- sometimes the stat is nested inside a Frame or Value object
+    -- search children and grandchildren for matching names or text
     for _, v in pairs(container:GetChildren()) do
-        if v and v:IsA("Instance") then
+        if v and v.Name and type(v.Name) == "string" then
             if v.Name:lower():find(name:lower()) then
                 local txt = extractText(v)
                 if txt and txt ~= "" then return txt end
             end
-            -- check grandchildren
             for _, g in pairs(v:GetChildren()) do
-                if g and g.Name:lower():find(name:lower()) then
+                if g and g.Name and type(g.Name) == "string" and g.Name:lower():find(name:lower()) then
                     local txt = extractText(g)
                     if txt and txt ~= "" then return txt end
                 end
@@ -181,7 +179,6 @@ RunService.Heartbeat:Connect(function(dt)
 
     local eggModel, eggTag = findEggTag()
     if not eggModel or not eggTag then
-        -- No egg found, set defaults
         pcall(function()
             NameParagraph:Set({Title = "Name", Content = "No egg detected"})
             PriceParagraph:Set({Title = "Price", Content = "N/A"})
@@ -196,10 +193,10 @@ RunService.Heartbeat:Connect(function(dt)
 
     -- Try to find Container inside the Eggtag first, then fallback to model
     local container = nil
-    if eggTag:FindFirstChild("Container") then
+    if eggTag and eggTag:FindFirstChild("Container") then
         container = eggTag:FindFirstChild("Container")
     else
-        container = eggModel:FindFirstChild("Container") or eggTag:FindFirstChildWhichIsA("Folder") or eggTag:FindFirstChildWhichIsA("Frame")
+        container = (eggModel and eggModel:FindFirstChild("Container")) or (eggTag and eggTag:FindFirstChildWhichIsA and eggTag:FindFirstChildWhichIsA("Folder")) or (eggTag and eggTag:FindFirstChildWhichIsA and eggTag:FindFirstChildWhichIsA("Frame"))
     end
 
     local price = readStat(container, "Price") or "Unknown"
