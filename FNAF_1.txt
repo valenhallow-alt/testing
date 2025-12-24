@@ -159,12 +159,46 @@ end
 local currentEggTag = nil
 local currentParentName = nil
 
-local function refreshCurrentEgg()
+local function bindContainerListeners(eggtag)
+    if not eggtag then return end
+    local container = eggtag:FindFirstChild("Container") or eggtag
+    if not container then return end
+
+    -- Disconnect previous listeners if present
+    if container._rayfield_listeners then
+        for _, conn in ipairs(container._rayfield_listeners) do
+            pcall(function() conn:Disconnect() end)
+        end
+    end
+    container._rayfield_listeners = {}
+
+    -- Listen for children changes on the container
+    local added = container.ChildAdded:Connect(function() pcall(function() refreshCurrentEgg() end) end)
+    local removed = container.ChildRemoved:Connect(function() pcall(function() refreshCurrentEgg() end) end)
+    table.insert(container._rayfield_listeners, added)
+    table.insert(container._rayfield_listeners, removed)
+
+    -- Listen for value/text changes on relevant children
+    for _, obj in ipairs(container:GetChildren()) do
+        if obj:IsA("StringValue") or obj:IsA("NumberValue") or obj:IsA("IntValue") or obj:IsA("BoolValue") or obj:IsA("TextLabel") or obj:IsA("TextBox") then
+            local conn = obj.Changed:Connect(function() pcall(function() refreshCurrentEgg() end) end)
+            table.insert(container._rayfield_listeners, conn)
+        end
+    end
+end
+
+-- Note: forward declaration so bindContainerListeners can call refreshCurrentEgg safely
+function refreshCurrentEgg() end
+
+-- Refresh function that also binds listeners immediately when egg changes
+function refreshCurrentEgg()
     local eggtag, parentName = findEggTag()
     if eggtag ~= currentEggTag or parentName ~= currentParentName then
         currentEggTag = eggtag
         currentParentName = parentName
         updateEggInfo(currentEggTag, currentParentName)
+        -- Bind listeners to the new container immediately so manual spawns are tracked
+        pcall(function() bindContainerListeners(currentEggTag) end)
     else
         updateEggInfo(currentEggTag, currentParentName)
     end
@@ -176,41 +210,27 @@ workspace.DescendantAdded:Connect(function(desc)
         pcall(refreshCurrentEgg)
     end
 end)
+
 workspace.DescendantRemoving:Connect(function(desc)
     if desc.Name == "Eggtag" then
         wait(0.05)
-        pcall(refreshCurrentEgg)
+        pcall(function()
+            refreshCurrentEgg()
+            -- If an egg was removed and we no longer have an eggtag, treat it as confirmed
+            local eggtag, _ = findEggTag()
+            if not eggtag then
+                lastPurchaseConfirmed = true
+            end
+        end)
     end
 end)
-
-local function bindContainerListeners(eggtag)
-    if not eggtag then return end
-    local container = eggtag:FindFirstChild("Container") or eggtag
-    if container._rayfield_listeners then
-        for _, conn in ipairs(container._rayfield_listeners) do
-            pcall(function() conn:Disconnect() end)
-        end
-    end
-    container._rayfield_listeners = {}
-
-    local added = container.ChildAdded:Connect(function() pcall(refreshCurrentEgg) end)
-    local removed = container.ChildRemoved:Connect(function() pcall(refreshCurrentEgg) end)
-    table.insert(container._rayfield_listeners, added)
-    table.insert(container._rayfield_listeners, removed)
-
-    for _, obj in ipairs(container:GetChildren()) do
-        if obj:IsA("StringValue") or obj:IsA("NumberValue") or obj:IsA("IntValue") or obj:IsA("BoolValue") or obj:IsA("TextLabel") or obj:IsA("TextBox") then
-            local conn = obj.Changed:Connect(function() pcall(refreshCurrentEgg) end)
-            table.insert(container._rayfield_listeners, conn)
-        end
-    end
-end
 
 spawn(function()
     while true do
         pcall(function()
             refreshCurrentEgg()
-            bindContainerListeners(currentEggTag)
+            -- Bind listeners to current egg tag if not already bound (extra safety)
+            pcall(function() bindContainerListeners(currentEggTag) end)
         end)
         wait(1)
     end
@@ -472,6 +492,8 @@ local AutoBuySpinToggle = MainTab:CreateToggle({
 
                             if not entityId or entityId == "" then
                                 print("[AutoBuySpin] No entity id available; skipping purchase.")
+                                -- No entity id means nothing to buy; treat as no pending purchase
+                                lastPurchaseConfirmed = true
                             else
                                 local buy = true
                                 local buyThreshold = 1000 -- adjust threshold as needed
@@ -496,6 +518,8 @@ local AutoBuySpinToggle = MainTab:CreateToggle({
                                     end
                                 else
                                     print("[AutoBuySpin] Buy conditions not met; skipping.")
+                                    -- Treat skip as "no pending purchase" so we can request a new egg next loop
+                                    lastPurchaseConfirmed = true
                                 end
                             end
                         else
@@ -539,12 +563,18 @@ local AutoBuySpinToggle = MainTab:CreateToggle({
                                             end
                                         else
                                             print("[AutoBuySpin] No entity id after request; skipping purchase.")
+                                            -- No entity id after request; treat as no pending purchase
+                                            lastPurchaseConfirmed = true
                                         end
                                     else
                                         print("[AutoBuySpin] Egg did not spawn within timeout after request.")
+                                        -- If no egg spawned, clear pending purchase so we can try again
+                                        lastPurchaseConfirmed = true
                                     end
                                 else
                                     print("[AutoBuySpin] fireRequestEgg error:", tostring(err))
+                                    -- On error, allow retry next loop
+                                    lastPurchaseConfirmed = true
                                 end
                             else
                                 print("[AutoBuySpin] Waiting for previous purchase confirmation before requesting new egg.")
@@ -561,12 +591,32 @@ local AutoBuySpinToggle = MainTab:CreateToggle({
 -- Expose for external use if needed
 _G.AutoBuySpinToggle = AutoBuySpinToggle
 _G.GetCurrentEggInfo = function()
+    local ok, info = pcall(function()
+        if not currentEggTag or not currentEggTag.Parent then
+            return {
+                EggTag = nil,
+                ParentName = nil,
+                Price = nil,
+                Rarity = nil,
+                Variety = nil,
+            }
+        end
+        local container = currentEggTag:FindFirstChild("Container") or currentEggTag
+        return {
+            EggTag = currentEggTag,
+            ParentName = currentParentName,
+            Price = readContainerField(container, "Price"),
+            Rarity = readContainerField(container, "Rarity"),
+            Variety = readContainerField(container, "Variety"),
+        }
+    end)
+    if ok then return info end
     return {
-        EggTag = currentEggTag,
-        ParentName = currentParentName,
-        Price = currentEggTag and readContainerField(currentEggTag:FindFirstChild("Container") or currentEggTag, "Price") or nil,
-        Rarity = currentEggTag and readContainerField(currentEggTag:FindFirstChild("Container") or currentEggTag, "Rarity") or nil,
-        Variety = currentEggTag and readContainerField(currentEggTag:FindFirstChild("Container") or currentEggTag, "Variety") or nil,
+        EggTag = nil,
+        ParentName = nil,
+        Price = nil,
+        Rarity = nil,
+        Variety = nil,
     }
 end
 
