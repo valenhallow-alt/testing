@@ -82,7 +82,7 @@ end
 pcall(function() Rayfield:LoadConfiguration() end)
 
 ----------------------------------------------------------------
--- Main tab with robust Auto Spin+Buy Egg (event-driven, low-lag)
+-- Main tab with robust Auto Spin+Buy Egg (event-driven, requests new egg after purchase)
 ----------------------------------------------------------------
 
 local MainTab = Window:CreateTab("Main", 4483362458)
@@ -115,12 +115,10 @@ local function readValue(obj)
         if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
             return obj.Text
         end
-        -- Some UI frameworks store text in a child named "Text" or "Value"
         local v = obj:FindFirstChild("Value") or obj:FindFirstChild("Text")
         if v and (v:IsA("StringValue") or v:IsA("IntValue") or v:IsA("NumberValue")) then
             return v.Value
         end
-        -- Try common properties safely
         local ok, val = pcall(function() return obj.Value end)
         if ok and val ~= nil then return val end
         ok, val = pcall(function() return obj.Text end)
@@ -135,18 +133,14 @@ local function parseEggtagInstance(tag)
     local model = tag.Parent
     local modelName = tostring(model.Name or "")
 
-    -- Container may be a child named "Container" or the tag itself
     local container = tag:FindFirstChild("Container") or tag
 
-    -- Helper to find child ignoring case and searching descendants (limited)
     local function findChildIgnoreCase(parent, candidates)
         if not parent then return nil end
-        -- First try direct children with exact names
         for _, name in ipairs(candidates) do
             local c = parent:FindFirstChild(name)
             if c then return c end
         end
-        -- Then try a shallow descendant scan (limit to reduce cost)
         for _, child in ipairs(parent:GetChildren()) do
             local lname = tostring(child.Name):lower()
             for _, name in ipairs(candidates) do
@@ -154,7 +148,6 @@ local function parseEggtagInstance(tag)
                     return child
                 end
             end
-            -- check grandchildren one level deep
             for _, g in ipairs(child:GetChildren()) do
                 local glname = tostring(g.Name):lower()
                 for _, name in ipairs(candidates) do
@@ -178,7 +171,6 @@ local function parseEggtagInstance(tag)
     if type(rarity) == "string" then rarity = rarity:match("^%s*(.-)%s*$") end
     if type(variety) == "string" then variety = variety:match("^%s*(.-)%s*$") end
 
-    -- If rarity/variety are still nil, try a limited shallow scan for likely text
     if (not rarity or rarity == "") and container then
         for _, v in ipairs(container:GetChildren()) do
             local n = tostring(v.Name):lower()
@@ -223,7 +215,6 @@ end
 
 -- Find any Eggtag in workspace and return parsed info (first found) - used only for initial scan
 local function findEggInWorkspace()
-    -- quick top-level scan
     for _, child in ipairs(Workspace:GetChildren()) do
         local tag = child:FindFirstChild("Eggtag")
         if tag then
@@ -231,7 +222,6 @@ local function findEggInWorkspace()
             if info then return info end
         end
     end
-    -- shallow descendant scan (only once when needed)
     for _, desc in ipairs(Workspace:GetDescendants()) do
         if desc.Name == "Eggtag" then
             local info = parseEggtagInstance(desc)
@@ -284,7 +274,6 @@ local function waitForPriceToPopulate(info, timeout)
     local interval = 0.35
     while elapsed < timeout do
         if not info or not info.tagInstance or not info.tagInstance.Parent then return nil end
-        -- re-parse the same tag to get updated price/fields
         local refreshed = parseEggtagInstance(info.tagInstance)
         if refreshed and refreshed.price and tostring(refreshed.price) ~= "" then
             return refreshed
@@ -300,16 +289,14 @@ local function waitForPurchaseConfirmation(info, timeout)
     timeout = timeout or 6
     local elapsed = 0
     local interval = 0.25
-    -- If the tag instance is destroyed or parent changed, assume purchase/consumption
     while elapsed < timeout do
         if not info or not info.tagInstance then
-            return true -- already gone
+            return true
         end
         local ok, exists = pcall(function() return info.tagInstance.Parent ~= nil end)
         if not ok or not exists then
             return true
         end
-        -- Some games may keep the tag but change its contents; check if model still has same name or price
         local current = parseEggtagInstance(info.tagInstance)
         if not current then
             return true
@@ -345,14 +332,11 @@ local function tryStartWorker()
         while running and currentEggInfo do
             -- Ensure price/rarity/variety available
             if not currentEggInfo.price or tostring(currentEggInfo.price) == "" or currentEggInfo.price == "nil" then
-                -- Try to refresh once quickly
                 local refreshed = waitForPriceToPopulate(currentEggInfo, 4)
                 if refreshed then
                     currentEggInfo = refreshed
                 else
-                    -- wait a bit and retry
                     shortWait(1.0)
-                    -- re-check; if still missing, break loop and wait for tag updates or new egg
                     if not currentEggInfo or not currentEggInfo.price or tostring(currentEggInfo.price) == "" then
                         break
                     end
@@ -372,13 +356,22 @@ local function tryStartWorker()
             if purchased then
                 -- small delay to avoid spamming
                 shortWait(0.8)
-                -- clear currentEggInfo; wait for next egg event to set it
+                -- Clear current egg info
                 currentEggInfo = nil
+
+                -- IMPORTANT: request a new egg after confirmed purchase (non-spammy)
+                if running and requestEggRemote and requestEggRemote.FireServer then
+                    pcall(function()
+                        requestEggRemote:FireServer(unpack(buildRequestArgs()))
+                    end)
+                end
+
+                -- allow a short time for the new egg to spawn and be detected by DescendantAdded handler
+                shortWait(0.6)
                 break
             else
                 -- retry after a short delay
                 shortWait(1.2)
-                -- re-parse the tag once to refresh state
                 if currentEggInfo and currentEggInfo.tagInstance then
                     local refreshed = parseEggtagInstance(currentEggInfo.tagInstance)
                     if refreshed then currentEggInfo = refreshed end
@@ -395,7 +388,6 @@ local function onEggAdded(desc)
     if not desc or desc.Name ~= "Eggtag" then return end
     local ok, info = pcall(function() return parseEggtagInstance(desc) end)
     if ok and info then
-        -- If we already have an egg, prefer the existing one (avoid switching mid-purchase)
         if not currentEggInfo then
             currentEggInfo = info
             tryStartWorker()
@@ -424,7 +416,6 @@ local function scanOnceForEgg()
             end
         end
     end
-    -- fallback: shallow descendant scan (only once)
     for _, desc in ipairs(Workspace:GetDescendants()) do
         if desc.Name == "Eggtag" then
             local info = parseEggtagInstance(desc)
@@ -445,7 +436,6 @@ MainTab:CreateToggle({
     Callback = function(value)
         running = value
         if running then
-            -- connect events (only once)
             if not eggAddedConn then
                 eggAddedConn = Workspace.DescendantAdded:Connect(function(desc)
                     local ok, err = pcall(function() onEggAdded(desc) end)
@@ -459,7 +449,6 @@ MainTab:CreateToggle({
                 end)
             end
 
-            -- Do a single scan to pick up any existing egg without continuous polling
             scanOnceForEgg()
 
             -- If no egg found, request one (non-spammy)
@@ -467,10 +456,8 @@ MainTab:CreateToggle({
                 pcall(function()
                     requestEggRemote:FireServer(unpack(buildRequestArgs()))
                 end)
-                -- wait briefly for spawn and let event handler pick it up
                 task.delay(0.6, function()
                     if not currentEggInfo then
-                        -- fallback: try a short wait-for-egg
                         local info = waitForEggToAppear(3)
                         if info then
                             currentEggInfo = info
@@ -480,7 +467,6 @@ MainTab:CreateToggle({
                 end)
             end
         else
-            -- stop: disconnect events and stop worker
             if eggAddedConn then
                 eggAddedConn:Disconnect()
                 eggAddedConn = nil
