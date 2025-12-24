@@ -91,10 +91,6 @@ do
     local StatusSection = StatusTab:CreateSection("Spawned Egg Status")
     local StatusParagraph = StatusTab:CreateParagraph({Title = "Egg Status", Content = "Searching for spawned egg..."})
 
-    -- Debug paragraph to show remotes, last args, and last detected egg
-    local DebugSection = StatusTab:CreateSection("Auto Debug")
-    local DebugParagraph = StatusTab:CreateParagraph({Title = "Auto Debug", Content = "Idle."})
-
     -- Always enabled; user cannot disable
     local enabled = true
 
@@ -187,55 +183,32 @@ do
             return s
         end
 
-        -- Remote references (cached) and path strings for debug
+        -- Remote references (cached)
         local Rep = game:GetService("ReplicatedStorage")
-        local function getRemoteAndPath(name)
-            local path = "ReplicatedStorage.Modules.Internals.Skeleton.Conduit.Instances." .. name
+        local function getRemote(name)
             local ok, rem = pcall(function()
                 return Rep:WaitForChild("Modules"):WaitForChild("Internals"):WaitForChild("Skeleton"):WaitForChild("Conduit"):WaitForChild("Instances"):WaitForChild(name)
             end)
-            if ok and rem then
-                return rem, path
-            end
-            return nil, path
+            if ok then return rem end
+            return nil
         end
-        local requestEggRemote, requestEggPath = getRemoteAndPath("_requestEgg")
-        local purchaseEggRemote, purchaseEggPath = getRemoteAndPath("_purchaseEgg")
-
-        -- Helper to update debug UI and print
-        local function updateDebug(statusText)
-            local content = statusText or "Idle."
-            pcall(function()
-                DebugParagraph:Set({Title = "Auto Debug", Content = content})
-            end)
-            pcall(function() print("[Auto Debug] " .. content) end)
-        end
+        local requestEggRemote = getRemote("_requestEgg")
+        local purchaseEggRemote = getRemote("_purchaseEgg")
 
         -- Core loop
         local function autoSpawnBuyLoop()
             while autoEnabled do
-                -- Show which remotes we have (or not)
-                local remInfo = string.format("RequestRemote: %s | PurchaseRemote: %s", requestEggPath or "nil", purchaseEggPath or "nil")
-                updateDebug(remInfo)
-
                 -- 1) Request spawn
                 if requestEggRemote then
-                    local okReq, errReq = pcall(function()
+                    pcall(function()
                         local args = {
                             {
                                 __raw = true,
                                 data = {}
                             }
                         }
-                        -- Log the exact args we will send
-                        updateDebug(remInfo .. "\nFiring _requestEgg with args: " .. tostring(args))
                         requestEggRemote:FireServer(unpack(args))
                     end)
-                    if not okReq then
-                        updateDebug(remInfo .. "\n_requestEgg FireServer failed: " .. tostring(errReq))
-                    end
-                else
-                    updateDebug(remInfo .. "\n_requestEgg not found.")
                 end
 
                 -- 2) Wait for detection (poll getAllSpawnedEggsInfo)
@@ -251,57 +224,27 @@ do
                     wait(0.4)
                 end
 
-                if not detectedEgg then
-                    updateDebug(remInfo .. "\nNo egg detected within timeout.")
-                else
-                    -- Show the raw detected fields
-                    local detText = string.format("Detected Egg -> Name: %s | Rarity: %s | Variety: %s", tostring(detectedEgg.Name), tostring(detectedEgg.Rarity), tostring(detectedEgg.Variety))
-                    updateDebug(remInfo .. "\n" .. detText)
+                -- 3) If detected, attempt purchase
+                if detectedEgg and purchaseEggRemote then
+                    local namePart = sanitizeNameForId(detectedEgg.Name or "Unknown")
+                    local rarityPart = tostring(detectedEgg.Rarity or "Basic")
+                    local varietyPart = tostring(detectedEgg.Variety or "Glitch")
 
-                    -- Extra: attempt to dump container children and their read values for debugging
+                    local idString = "entity_" .. namePart .. "_egg"
+
                     pcall(function()
-                        local container = detectedEgg.Container
-                        if container and container:GetChildren() then
-                            local parts = {}
-                            for _, c in ipairs(container:GetChildren()) do
-                                local val = readTextOrValue(c) or "<no text/value>"
-                                table.insert(parts, tostring(c.Name) .. "=" .. tostring(val))
-                            end
-                            if #parts > 0 then
-                                updateDebug(remInfo .. "\nContainer children: " .. table.concat(parts, "; "))
-                            end
-                        end
-                    end)
-
-                    -- 3) If detected, attempt purchase
-                    if purchaseEggRemote then
-                        local namePart = sanitizeNameForId(detectedEgg.Name or "Unknown")
-                        local rarityPart = tostring(detectedEgg.Rarity or "Basic")
-                        local varietyPart = tostring(detectedEgg.Variety or "Glitch")
-
-                        local idString = "entity_" .. namePart .. "_egg"
-
-                        local okBuy, errBuy = pcall(function()
-                            local args = {
-                                {
-                                    __raw = true,
-                                    data = {
-                                        id = idString,
-                                        rarity = rarityPart,
-                                        variety = varietyPart
-                                    }
+                        local args = {
+                            {
+                                __raw = true,
+                                data = {
+                                    id = idString,
+                                    rarity = rarityPart,
+                                    variety = varietyPart
                                 }
                             }
-                            -- Log the exact args we will send to purchase
-                            updateDebug(remInfo .. "\nFiring _purchaseEgg with args: id=" .. tostring(idString) .. " | rarity=" .. tostring(rarityPart) .. " | variety=" .. tostring(varietyPart))
-                            purchaseEggRemote:FireServer(unpack(args))
-                        end)
-                        if not okBuy then
-                            updateDebug(remInfo .. "\n_purchaseEgg FireServer failed: " .. tostring(errBuy))
-                        end
-                    else
-                        updateDebug(remInfo .. "\n_purchaseEgg not found.")
-                    end
+                        }
+                        purchaseEggRemote:FireServer(unpack(args))
+                    end)
                 end
 
                 -- 4) Small delay before next cycle to avoid spamming
@@ -312,7 +255,6 @@ do
                     waited = waited + 0.2
                 end
             end
-            updateDebug("Auto Spawn+Buy stopped.")
         end
 
         -- Create the Rayfield toggle
