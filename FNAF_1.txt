@@ -85,38 +85,27 @@ end
 -- Load (or create) configuration so Rayfield can restore UI state if needed
 pcall(function() Rayfield:LoadConfiguration() end)
 
--- Egg Status UI (always enabled; toggle removed) + Auto Buy+Spin Eggs toggle
+-- Egg Status UI (always enabled; toggle removed)
 do
     local StatusTab = Window:CreateTab("Egg Status", 4483362458)
     local StatusSection = StatusTab:CreateSection("Spawned Egg Status")
     local StatusParagraph = StatusTab:CreateParagraph({Title = "Egg Status", Content = "Searching for spawned egg..."})
 
-    -- Auto Buy+Spin Eggs toggle (user can enable/disable)
-    local AutoBuyToggle = StatusTab:CreateToggle({
-        Name = "Auto Buy+Spin Eggs",
-        CurrentValue = false,
-        Flag = "AutoBuySpinEggs",
-        Callback = function(Value) end,
-    })
-
-    -- Always enabled status display
-    local enabledStatus = true
-
-    -- Local control for auto buy
-    local autoBuyEnabled = false
-    AutoBuyToggle.Callback = function(Value)
-        autoBuyEnabled = Value
-    end
+    -- Always enabled; user cannot disable
+    local enabled = true
 
     -- Helper to read a text-like child safely
     local function readTextOrValue(inst)
         if not inst then return nil end
+        -- Common GUI text objects
         if inst:IsA("TextLabel") or inst:IsA("TextBox") or inst:IsA("TextButton") then
             return inst.Text
         end
+        -- Value objects (StringValue, IntValue, NumberValue, etc.)
         if inst:IsA("ValueBase") and inst.Value ~= nil then
             return tostring(inst.Value)
         end
+        -- Try common properties safely
         local ok, txt = pcall(function() return inst.Text end)
         if ok and type(txt) == "string" and txt ~= "" then return txt end
         local ok2, val = pcall(function() return inst.Value end)
@@ -156,75 +145,10 @@ do
         return table.concat(lines, "\n")
     end
 
-    -- === Locate remotes once and keep references ===
-    local requestRemote, purchaseRemote
-    local function locateRemotesBlocking()
-        -- Use WaitForChild chain to reliably get the Instances container and remotes.
-        -- This will yield until the path exists (which is usually fine at runtime).
-        local ok, modules = pcall(function()
-            return game:GetService("ReplicatedStorage"):WaitForChild("Modules")
-        end)
-        if not ok or not modules then return end
-
-        local internals = modules:WaitForChild("Internals")
-        if not internals then return end
-        local skeleton = internals:WaitForChild("Skeleton")
-        if not skeleton then return end
-        local conduit = skeleton:WaitForChild("Conduit")
-        if not conduit then return end
-        local instances = conduit:WaitForChild("Instances")
-        if not instances then return end
-
-        requestRemote = instances:FindFirstChild("_requestEgg") or instances:FindFirstChild("_RequestEgg") or instances:FindFirstChild("requestEgg")
-        purchaseRemote = instances:FindFirstChild("_purchaseEgg") or instances:FindFirstChild("_PurchaseEgg") or instances:FindFirstChild("purchaseEgg")
-    end
-
-    -- Try to locate remotes now (blocking). If they don't exist yet, this will wait until they do.
-    pcall(function()
-        locateRemotesBlocking()
-    end)
-
-    -- Helper wrappers to fire remotes safely and log result
-    local function safeFireRequest()
-        if not requestRemote then
-            return false, "requestRemote missing"
-        end
-        local args = {
-            {
-                __raw = true,
-                data = {}
-            }
-        }
-        local ok, err = pcall(function()
-            requestRemote:FireServer(unpack(args))
-        end)
-        return ok, err
-    end
-
-    local function safeFirePurchase(id, rarity, variety)
-        if not purchaseRemote then
-            return false, "purchaseRemote missing"
-        end
-        local args = {
-            {
-                __raw = true,
-                data = {
-                    id = id or "",
-                    rarity = rarity or "",
-                    variety = variety or ""
-                }
-            }
-        }
-        local ok, err = pcall(function()
-            purchaseRemote:FireServer(unpack(args))
-        end)
-        return ok, err
-    end
-
-    -- Updater loop for status paragraph (always running)
+    -- Updater loop (always running)
     spawn(function()
         while true do
-            if enabledStatus then
+            if enabled then
                 local ok, eggs = pcall(function()
                     return getAllSpawnedEggsInfo()
                 end)
@@ -244,129 +168,113 @@ do
         end
     end)
 
-    -- Auto Buy+Spin Eggs loop (robust firing logic)
-    spawn(function()
-        local cycleDelay = 1.2 -- delay between full cycles (seconds)
-        while true do
-            if autoBuyEnabled then
-                -- Ensure remotes are present; try to locate again if missing
-                if not requestRemote or not purchaseRemote then
+    -- Auto Spawn + Buy Eggs toggle (uses existing getAllSpawnedEggsInfo)
+    do
+        local AutoSection = StatusTab:CreateSection("Auto Spawn+Buy")
+        local autoEnabled = false
+        local autoThread = nil
+
+        -- Helper: sanitize name for id (replace spaces and non-alphanum with underscore)
+        local function sanitizeNameForId(name)
+            if not name then return "Unknown" end
+            local s = tostring(name)
+            s = s:gsub("%s+", "_")
+            s = s:gsub("[^%w_]", "_")
+            return s
+        end
+
+        -- Remote references (cached)
+        local Rep = game:GetService("ReplicatedStorage")
+        local function getRemote(name)
+            local ok, rem = pcall(function()
+                return Rep:WaitForChild("Modules"):WaitForChild("Internals"):WaitForChild("Skeleton"):WaitForChild("Conduit"):WaitForChild("Instances"):WaitForChild(name)
+            end)
+            if ok then return rem end
+            return nil
+        end
+        local requestEggRemote = getRemote("_requestEgg")
+        local purchaseEggRemote = getRemote("_purchaseEgg")
+
+        -- Core loop
+        local function autoSpawnBuyLoop()
+            while autoEnabled do
+                -- 1) Request spawn
+                if requestEggRemote then
                     pcall(function()
-                        locateRemotesBlocking()
+                        local args = {
+                            {
+                                __raw = true,
+                                data = {}
+                            }
+                        }
+                        requestEggRemote:FireServer(unpack(args))
                     end)
                 end
 
-                -- 1) Check for existing eggs in workspace
-                local eggs = {}
-                pcall(function() eggs = getAllSpawnedEggsInfo() end)
-
-                if eggs and #eggs > 0 then
-                    -- If an egg exists, attempt to purchase it
-                    local target = eggs[1]
-                    local id = target.Name
-                    local rarity = target.Rarity
-                    local variety = target.Variety
-
-                    if not purchaseRemote then
-                        pcall(function()
-                            StatusParagraph:Set({Title = "Egg Status", Content = "Purchase remote not found; retrying locate..."})
-                        end)
-                        -- try locating again but don't block too long
-                        pcall(function()
-                            locateRemotesBlocking()
-                        end)
-                        wait(0.2)
+                -- 2) Wait for detection (poll getAllSpawnedEggsInfo)
+                local detectedEgg = nil
+                local startTime = tick()
+                local timeout = 12 -- seconds to wait for an egg to appear
+                while autoEnabled and (tick() - startTime) < timeout do
+                    local ok, eggs = pcall(function() return getAllSpawnedEggsInfo() end)
+                    if ok and eggs and #eggs > 0 then
+                        detectedEgg = eggs[1] -- use first detected egg
+                        break
                     end
-
-                    if purchaseRemote then
-                        local ok, err = safeFirePurchase(id, rarity, variety)
-                        if ok then
-                            pcall(function()
-                                StatusParagraph:Set({Title = "Egg Status", Content = ("Fired purchase for: %s | Rarity: %s | Variety: %s"):format(tostring(id), tostring(rarity), tostring(variety))})
-                            end)
-                        else
-                            pcall(function()
-                                StatusParagraph:Set({Title = "Egg Status", Content = ("Purchase FireServer failed: %s"):format(tostring(err))})
-                            end)
-                        end
-                        -- Give server time to process purchase and to avoid immediate re-purchase
-                        wait(1.0)
-                    else
-                        -- Can't purchase; wait a bit before retrying
-                        wait(1.5)
-                    end
-                else
-                    -- No egg present: request a new egg once, then poll for it
-                    if not requestRemote then
-                        pcall(function()
-                            StatusParagraph:Set({Title = "Egg Status", Content = "Request remote not found; retrying locate..."})
-                        end)
-                        pcall(function()
-                            locateRemotesBlocking()
-                        end)
-                        wait(0.2)
-                    end
-
-                    if requestRemote then
-                        local ok, err = safeFireRequest()
-                        if ok then
-                            pcall(function()
-                                StatusParagraph:Set({Title = "Egg Status", Content = "Requested new egg, waiting for spawn..."})
-                            end)
-                        else
-                            pcall(function()
-                                StatusParagraph:Set({Title = "Egg Status", Content = ("Request FireServer failed: %s"):format(tostring(err))})
-                            end)
-                            -- If request failed, wait and retry later
-                            wait(1.5)
-                            continue
-                        end
-                    else
-                        pcall(function()
-                            StatusParagraph:Set({Title = "Egg Status", Content = "Request remote not found; cannot spawn egg."})
-                        end)
-                        wait(2.0)
-                        continue
-                    end
-
-                    -- After requesting, poll for the spawned egg (short timeout)
-                    local found = false
-                    local timeout = 3.0
-                    local elapsed = 0
-                    local pollInterval = 0.12
-                    while elapsed < timeout do
-                        wait(pollInterval)
-                        elapsed = elapsed + pollInterval
-                        local newEggs = {}
-                        pcall(function() newEggs = getAllSpawnedEggsInfo() end)
-                        if newEggs and #newEggs > 0 then
-                            -- Ensure the egg has meaningful fields (sometimes the billboard spawns but text updates later)
-                            local first = newEggs[1]
-                            if first.Rarity and first.Rarity ~= "N/A" and first.Variety and first.Variety ~= "N/A" then
-                                found = true
-                                break
-                            end
-                            -- If fields are "N/A", keep polling a bit longer
-                        end
-                    end
-
-                    if not found then
-                        pcall(function()
-                            StatusParagraph:Set({Title = "Egg Status", Content = "No fully-initialized egg detected after request."})
-                        end)
-                        -- small delay before next cycle to avoid spamming
-                        wait(1.0)
-                    else
-                        -- On next cycle the purchase branch will pick it up and attempt purchase
-                        wait(0.1)
-                    end
+                    wait(0.4)
                 end
 
-                -- End of cycle delay
-                wait(cycleDelay)
-            else
-                wait(0.25)
+                -- 3) If detected, attempt purchase
+                if detectedEgg and purchaseEggRemote then
+                    local namePart = sanitizeNameForId(detectedEgg.Name or "Unknown")
+                    local rarityPart = tostring(detectedEgg.Rarity or "Basic")
+                    local varietyPart = tostring(detectedEgg.Variety or "Glitch")
+
+                    local idString = "entity_" .. namePart .. "_egg"
+
+                    pcall(function()
+                        local args = {
+                            {
+                                __raw = true,
+                                data = {
+                                    id = idString,
+                                    rarity = rarityPart,
+                                    variety = varietyPart
+                                }
+                            }
+                        }
+                        purchaseEggRemote:FireServer(unpack(args))
+                    end)
+                end
+
+                -- 4) Small delay before next cycle to avoid spamming
+                local cycleDelay = 1.0
+                local waited = 0
+                while autoEnabled and waited < cycleDelay do
+                    wait(0.2)
+                    waited = waited + 0.2
+                end
             end
         end
-    end)
+
+        -- Create the Rayfield toggle
+        StatusTab:CreateToggle({
+            Name = "Auto Spawn+Buy Eggs",
+            CurrentValue = false,
+            Flag = "AutoSpawnBuyEggs",
+            Callback = function(val)
+                autoEnabled = val
+                if autoEnabled then
+                    -- start loop in a new thread if not already running
+                    if not autoThread or coroutine.status(autoThread) ~= "running" then
+                        autoThread = spawn(function()
+                            autoSpawnBuyLoop()
+                        end)
+                    end
+                else
+                    -- disabling will cause loop to exit naturally
+                end
+            end
+        })
+    end
 end
