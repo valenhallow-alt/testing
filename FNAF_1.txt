@@ -227,6 +227,7 @@ local MainSection = MainTab:CreateSection("Automation")
 local lastPurchaseConfirmed = true
 local purchaseTimeout = 6 -- seconds to wait for confirmation after purchase attempt
 local spawnTimeout = 6 -- seconds to wait for egg spawn after request
+local interRemoteDelay = 0.4 -- seconds between firing request and purchase when both are fired sequentially
 
 -- Helper: try to find the Instances folder and remotes; returns table with remotes or nil + error
 local function getInstancesFolder()
@@ -248,7 +249,7 @@ local function getInstancesFolder()
     return nil, inst
 end
 
--- Helper: fire _requestEgg remote
+-- Helper: fire _requestEgg remote and print exact remote object info
 local function fireRequestEgg()
     local instances, err = getInstancesFolder()
     if not instances then
@@ -258,6 +259,11 @@ local function fireRequestEgg()
     if not req then
         return false, "_requestEgg remote not found in Instances"
     end
+
+    -- Print exact remote object info
+    local okName, fullName = pcall(function() return req:GetFullName() end)
+    print("[fireRequestEgg] About to call _requestEgg remote. Object tostring:", tostring(req), "FullName:", (okName and fullName) and fullName or "unknown")
+
     local ok, res = pcall(function()
         local args = {
             {
@@ -265,44 +271,89 @@ local function fireRequestEgg()
                 data = {}
             }
         }
-        -- Use FireServer if available
         if req.FireServer then
             req:FireServer(unpack(args))
+        elseif req.InvokeServer then
+            req:InvokeServer(unpack(args))
         else
-            error("_requestEgg does not have FireServer")
+            error("_requestEgg has no FireServer/InvokeServer")
         end
     end)
     return ok, res
 end
 
--- Helper: fire _purchaseEgg remote with id, rarity, variety
+-- Improved firePurchaseEgg: detects remote type, tries common arg styles, logs results and prints exact remote object info
+local HttpService = game:GetService("HttpService")
 local function firePurchaseEgg(id, rarity, variety)
     local instances, err = getInstancesFolder()
     if not instances then
         return false, "Instances folder not found: " .. tostring(err)
     end
+
     local pur = instances:FindFirstChild("_purchaseEgg")
     if not pur then
         return false, "_purchaseEgg remote not found in Instances"
     end
-    local ok, res = pcall(function()
-        local args = {
-            {
-                __raw = true,
-                data = {
-                    id = tostring(id or ""),
-                    rarity = tostring(rarity or ""),
-                    variety = tostring(variety or "")
-                }
+
+    local args = {
+        {
+            __raw = true,
+            data = {
+                id = tostring(id or ""),
+                rarity = tostring(rarity or ""),
+                variety = tostring(variety or "")
             }
         }
-        if pur.FireServer then
-            pur:FireServer(unpack(args))
+    }
+
+    -- Print exact remote object info
+    local okName, fullName = pcall(function() return pur:GetFullName() end)
+    print("[firePurchaseEgg] About to call _purchaseEgg remote. Object tostring:", tostring(pur), "FullName:", (okName and fullName) and fullName or "unknown")
+
+    local okJson, jsonPreview = pcall(function() return HttpService:JSONEncode(args) end)
+    if okJson then
+        print("[firePurchaseEgg] Args preview:", jsonPreview)
+    else
+        print("[firePurchaseEgg] Args preview failed to encode")
+    end
+
+    -- Try FireServer(unpack(args)) first if available
+    if pur.FireServer then
+        local ok, res = pcall(function() pur:FireServer(unpack(args)) end)
+        if ok then
+            print("[firePurchaseEgg] Called FireServer(unpack(args)) successfully.")
+            return true, "FireServer(unpack(args)) succeeded"
         else
-            error("_purchaseEgg does not have FireServer")
+            print("[firePurchaseEgg] FireServer(unpack(args)) failed:", tostring(res))
+            local ok2, res2 = pcall(function() pur:FireServer(args) end)
+            if ok2 then
+                print("[firePurchaseEgg] Called FireServer(args) successfully (table as single arg).")
+                return true, "FireServer(args) succeeded"
+            else
+                print("[firePurchaseEgg] FireServer(args) also failed:", tostring(res2))
+            end
         end
-    end)
-    return ok, res
+    end
+
+    -- Try InvokeServer variants if available
+    if pur.InvokeServer then
+        local ok, res = pcall(function() return pur:InvokeServer(unpack(args)) end)
+        if ok then
+            print("[firePurchaseEgg] Called InvokeServer(unpack(args)) successfully. Return:", tostring(res))
+            return true, "InvokeServer(unpack(args)) succeeded"
+        else
+            print("[firePurchaseEgg] InvokeServer(unpack(args)) failed:", tostring(res))
+            local ok2, res2 = pcall(function() return pur:InvokeServer(args) end)
+            if ok2 then
+                print("[firePurchaseEgg] Called InvokeServer(args) successfully. Return:", tostring(res2))
+                return true, "InvokeServer(args) succeeded"
+            else
+                print("[firePurchaseEgg] InvokeServer(args) also failed:", tostring(res2))
+            end
+        end
+    end
+
+    return false, "All call attempts failed for remote: " .. ((okName and fullName) and fullName or tostring(pur))
 end
 
 -- Wait for egg removal (confirmation of purchase) up to timeout seconds
@@ -334,7 +385,6 @@ end
 -- Try to detect explicit entity id inside the egg container (if the game exposes it)
 local function detectIdFromContainer(container)
     if not container then return nil end
-    -- Common possible fields: "Id", "EntityId", "id", "Identifier"
     local candidates = {"Id","id","EntityId","entityId","Identifier","identifier"}
     for _, name in ipairs(candidates) do
         local v = readContainerField(container, name)
@@ -348,9 +398,9 @@ end
 -- Build id from parent name as fallback
 local function buildEntityIdFromParent(parentName)
     if not parentName then return nil end
-    -- mapping table for known exceptions (add entries if you know them)
     local mapping = {
-        -- ["Lalatina"] = "entity_Nami_egg", -- example: add mappings here if needed
+        -- Add explicit mappings here if fallback pattern doesn't match server ids
+        -- ["Lalatina"] = "entity_Nami_egg",
     }
     if mapping[parentName] then
         return mapping[parentName]
@@ -361,12 +411,11 @@ local function buildEntityIdFromParent(parentName)
     return "entity_" .. normalized .. "_egg"
 end
 
--- Normalize rarity/variety strings to expected casing (attempt common formats)
+-- Normalize rarity/variety strings to expected casing
 local function normalizeStringForRemote(s)
     if not s then return "" end
     s = tostring(s)
-    s = s:gsub("^%s*(.-)%s*$", "%1") -- trim
-    -- Common expected forms: "Rare", "Common", "Normal", etc. Capitalize first letter
+    s = s:gsub("^%s*(.-)%s*$", "%1")
     local lower = string.lower(s)
     local capitalized = lower:gsub("(%a)([%w_']*)", function(a,b) return string.upper(a) .. b end)
     return capitalized
@@ -386,13 +435,10 @@ local AutoBuySpinToggle = MainTab:CreateToggle({
             spawn(function()
                 while _G.AutoBuySpinEggs do
                     pcall(function()
-                        -- Refresh egg info
                         refreshCurrentEgg()
 
-                        -- If an egg exists, attempt purchase using detected info
                         if currentEggTag then
                             local container = currentEggTag:FindFirstChild("Container") or currentEggTag
-                            -- Try to detect explicit id first
                             local explicitId = detectIdFromContainer(container)
                             local parentName = currentParentName
                             local entityId = explicitId or buildEntityIdFromParent(parentName)
@@ -408,9 +454,7 @@ local AutoBuySpinToggle = MainTab:CreateToggle({
                             if not entityId or entityId == "" then
                                 print("[AutoBuySpin] No entity id available; skipping purchase.")
                             else
-                                -- Optional: simple buy rule (customize)
                                 local buy = true
-                                -- Example: only buy if numeric price <= threshold (if price exists)
                                 local buyThreshold = 100
                                 if numericPrice and numericPrice > buyThreshold then
                                     buy = false
@@ -420,7 +464,6 @@ local AutoBuySpinToggle = MainTab:CreateToggle({
                                     print("[AutoBuySpin] Attempting purchase:", entityId, rarity, variety)
                                     local ok, err = firePurchaseEgg(entityId, rarity, variety)
                                     if ok then
-                                        -- Wait for confirmation (egg removal)
                                         local confirmed = waitForEggRemoval(purchaseTimeout)
                                         if confirmed then
                                             lastPurchaseConfirmed = true
@@ -443,12 +486,42 @@ local AutoBuySpinToggle = MainTab:CreateToggle({
                                 local ok, err = fireRequestEgg()
                                 if ok then
                                     lastPurchaseConfirmed = false
-                                    -- Wait for egg to spawn
+                                    -- Wait a short fixed delay between remotes as requested
+                                    wait(interRemoteDelay)
+
+                                    -- After the small delay, attempt to detect the spawned egg quickly
                                     local eggtag, parentName = waitForEggSpawn(spawnTimeout)
                                     if eggtag then
-                                        print("[AutoBuySpin] Egg spawned under parent:", tostring(parentName))
-                                        -- Immediately attempt purchase on the spawned egg in next loop iteration (or attempt now)
-                                        -- We'll attempt purchase in the next loop iteration to ensure container fields populate
+                                        print("[AutoBuySpin] Egg spawned under parent:", tostring(parentName), "-> attempting immediate purchase now.")
+                                        -- Refresh info and attempt purchase immediately
+                                        refreshCurrentEgg()
+                                        local container = eggtag:FindFirstChild("Container") or eggtag
+                                        local explicitId = detectIdFromContainer(container)
+                                        local entityId = explicitId or buildEntityIdFromParent(parentName)
+                                        local rawRarity = readContainerField(container, "Rarity")
+                                        local rawVariety = readContainerField(container, "Variety")
+                                        local rarity = normalizeStringForRemote(rawRarity)
+                                        local variety = normalizeStringForRemote(rawVariety)
+
+                                        print("[AutoBuySpin] After request -> Detected egg info. EntityId:", tostring(entityId), "Rarity:", tostring(rarity), "Variety:", tostring(variety))
+
+                                        if entityId and entityId ~= "" then
+                                            local ok2, err2 = firePurchaseEgg(entityId, rarity, variety)
+                                            if ok2 then
+                                                local confirmed = waitForEggRemoval(purchaseTimeout)
+                                                if confirmed then
+                                                    lastPurchaseConfirmed = true
+                                                    print("[AutoBuySpin] Purchase confirmed for:", entityId)
+                                                else
+                                                    lastPurchaseConfirmed = false
+                                                    print("[AutoBuySpin] Purchase not confirmed within timeout for:", entityId)
+                                                end
+                                            else
+                                                print("[AutoBuySpin] firePurchaseEgg error after request:", tostring(err2))
+                                            end
+                                        else
+                                            print("[AutoBuySpin] No entity id after request; skipping purchase.")
+                                        end
                                     else
                                         print("[AutoBuySpin] Egg did not spawn within timeout after request.")
                                     end
@@ -460,7 +533,7 @@ local AutoBuySpinToggle = MainTab:CreateToggle({
                             end
                         end
                     end)
-                    wait(1) -- adjust delay to avoid rate limits
+                    wait(1)
                 end
             end)
         end
