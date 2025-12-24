@@ -40,6 +40,45 @@ local Window = Rayfield:CreateWindow({
     }
 })
 
+-- Minimal UI toggle button (draggable) to show/hide Rayfield
+do
+    local ST = Instance.new("ScreenGui")
+    local T = Instance.new("ImageButton")
+    local Corner = Instance.new("UICorner")
+
+    ST.Name = "Toggle UnHub"
+    local parentGui = nil
+    pcall(function()
+        parentGui = Rayfield:GetParent() and Rayfield:GetParent().Parent
+    end)
+    if not parentGui or not parentGui:IsA("Instance") then
+        parentGui = game:GetService("CoreGui")
+    end
+    ST.Parent = parentGui
+    ST.ResetOnSpawn = false
+
+    T.Name = "UnHubToggle"
+    T.Parent = ST
+    T.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    T.Position = UDim2.new(0, 30, 0.08, 0)
+    T.Size = UDim2.new(0, 50, 0, 50)
+    T.Image = "rbxassetid://112045743772867"
+    T.Active = true
+    T.Draggable = true
+    T.AutoButtonColor = true
+
+    Corner.Name = "Corner"
+    Corner.Parent = T
+    Corner.CornerRadius = UDim.new(0, 8)
+
+    T.MouseButton1Click:Connect(function()
+        local ok, enabled = pcall(function() return Rayfield:GetEnable() end)
+        if ok then
+            pcall(function() Rayfield:SetEnable(not enabled) end)
+        end
+    end)
+end
+
 pcall(function() Rayfield:LoadConfiguration() end)
 
 ----------------------------------------------------------------
@@ -272,4 +311,4 @@ local function waitForPurchaseConfirmation(info, timeout)
 end
 
 -- Note: Auto Spin+Buy Egg toggle and its associated loop have been removed per request.
--- The rest of the script (egg parsing, remotes, helpers) remains intact so other UI/status code can use it.
+-- The rest of the script (egg parsing, remotes, helpers) remains intact so other UI/status code (including Egg stats tab) can use it.
