@@ -47,6 +47,8 @@ do
     local Corner = Instance.new("UICorner")
 
     ST.Name = "Toggle UnHub"
+    -- Parent to the same UI context Rayfield uses so it appears alongside the Rayfield UI
+    -- If Rayfield:GetParent() or its parent is nil, fall back to CoreGui
     local parentGui = nil
     pcall(function()
         parentGui = Rayfield:GetParent() and Rayfield:GetParent().Parent
@@ -62,7 +64,7 @@ do
     T.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
     T.Position = UDim2.new(0, 30, 0.08, 0)
     T.Size = UDim2.new(0, 50, 0, 50)
-    T.Image = "rbxassetid://112045743772867"
+    T.Image = "rbxassetid://112045743772867" -- replace with your decal id if desired
     T.Active = true
     T.Draggable = true
     T.AutoButtonColor = true
@@ -71,6 +73,7 @@ do
     Corner.Parent = T
     Corner.CornerRadius = UDim.new(0, 8)
 
+    -- Toggle Rayfield visibility on click
     T.MouseButton1Click:Connect(function()
         local ok, enabled = pcall(function() return Rayfield:GetEnable() end)
         if ok then
@@ -82,135 +85,102 @@ end
 -- Load (or create) configuration so Rayfield can restore UI state if needed
 pcall(function() Rayfield:LoadConfiguration() end)
 
-----------------------------------------------------------------
 -- Egg Status UI
--- Creates a Status tab with live-updating paragraphs for Name, Price, Rarity, Mutation (Variety)
-----------------------------------------------------------------
+do
+    local StatusTab = Window:CreateTab("Egg Status", 4483362458)
+    local StatusSection = StatusTab:CreateSection("Spawned Egg Status")
+    local StatusParagraph = StatusTab:CreateParagraph({Title = "Egg Status", Content = "Searching for spawned egg..."})
 
-local StatusTab = Window:CreateTab("Egg Status", 4483362458)
-local StatusSection = StatusTab:CreateSection("Egg Status")
+    local StatusToggle = StatusTab:CreateToggle({
+        Name = "Enable Status Updates",
+        CurrentValue = true,
+        Flag = "EggStatusToggle",
+        Callback = function(Value)
+            -- placeholder, will be set below
+        end,
+    })
 
--- Create paragraphs for each stat so we can update them dynamically
-local NameParagraph = StatusTab:CreateParagraph({Title = "Name", Content = "No egg detected"})
-local PriceParagraph = StatusTab:CreateParagraph({Title = "Price", Content = "N/A"})
-local RarityParagraph = StatusTab:CreateParagraph({Title = "Rarity", Content = "N/A"})
-local MutationParagraph = StatusTab:CreateParagraph({Title = "Mutation", Content = "N/A"})
+    local enabled = true
+    -- Ensure toggle's callback updates local enabled variable
+    StatusToggle.Callback = function(Value)
+        enabled = Value
+    end
 
--- Helper to safely extract text from a UI object or value object
-local function extractText(obj)
-    if not obj then return nil end
-    local ok, result = pcall(function()
-        if typeof(obj) == "Instance" then
-            if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
-                return tostring(obj.Text)
-            elseif obj:IsA("StringValue") or obj:IsA("IntValue") or obj:IsA("NumberValue") or obj:IsA("BoolValue") then
-                return tostring(obj.Value)
-            elseif obj:IsA("Frame") or obj:IsA("ImageLabel") or obj:IsA("ImageButton") then
-                if obj.FindFirstChildWhichIsA then
-                    local child = obj:FindFirstChildWhichIsA("TextLabel")
-                    if child then return tostring(child.Text) end
+    -- Helper to read a text-like child safely
+    local function readTextOrValue(inst)
+        if not inst then return nil end
+        -- Common GUI text objects
+        if inst:IsA("TextLabel") or inst:IsA("TextBox") or inst:IsA("TextButton") then
+            return inst.Text
+        end
+        -- Value objects (StringValue, IntValue, NumberValue, etc.)
+        if inst:IsA("ValueBase") and inst.Value ~= nil then
+            return tostring(inst.Value)
+        end
+        -- Try common properties
+        if pcall(function() return inst.Text end) then
+            local ok, txt = pcall(function() return inst.Text end)
+            if ok and type(txt) == "string" and txt ~= "" then return txt end
+        end
+        if pcall(function() return inst.Value end) then
+            local ok, val = pcall(function() return inst.Value end)
+            if ok and val ~= nil then return tostring(val) end
+        end
+        return nil
+    end
+
+    -- Scans workspace for all children that contain an Eggtag and returns a table of info
+    local function getAllSpawnedEggsInfo()
+        local results = {}
+        for _, child in pairs(workspace:GetChildren()) do
+            if child and child:FindFirstChild("Eggtag") then
+                local tag = child:FindFirstChild("Eggtag")
+                if tag and tag:FindFirstChild("Container") then
+                    local container = tag.Container
+                    local price = readTextOrValue(container:FindFirstChild("Price")) or "N/A"
+                    local rarity = readTextOrValue(container:FindFirstChild("Rarity")) or "N/A"
+                    local variety = readTextOrValue(container:FindFirstChild("Variety")) or readTextOrValue(container:FindFirstChild("Mutation")) or "N/A"
+                    local eggName = tostring(child.Name or "Unknown")
+                    table.insert(results, {Name = eggName, Price = price, Rarity = rarity, Variety = variety})
                 end
             end
         end
-        return tostring(obj)
-    end)
-    if ok then return result end
-    return nil
-end
+        return results
+    end
 
--- Find the first workspace child that contains an Eggtag (BillboardGui)
-local function findEggTag()
-    for _, child in pairs(workspace:GetChildren()) do
-        if child and child:FindFirstChild("Eggtag") then
-            local tag = child:FindFirstChild("Eggtag")
-            -- fixed operator precedence: ensure both checks are grouped
-            if tag and (tag:IsA and (tag:IsA("BillboardGui") or tag.ClassName == "BillboardGui")) then
-                return child, tag
-            end
-            -- return even if not a BillboardGui, but present
-            return child, tag
+    -- Formats a list of egg infos into a string for the paragraph
+    local function formatEggsForDisplay(eggs)
+        if not eggs or #eggs == 0 then
+            return "No egg detected."
         end
+        local lines = {}
+        for i, e in ipairs(eggs) do
+            local line = string.format("%d) Name: %s | Price: %s | Rarity: %s | Mutation: %s", i, tostring(e.Name), tostring(e.Price), tostring(e.Rarity), tostring(e.Variety))
+            table.insert(lines, line)
+        end
+        return table.concat(lines, "\n")
     end
-    return nil, nil
-end
 
--- Safely read a stat from the Eggtag.Container
-local function readStat(container, name)
-    if not container then return nil end
-    -- direct child
-    local stat = container:FindFirstChild(name)
-    if stat then
-        local txt = extractText(stat)
-        if txt and txt ~= "" then return txt end
-    end
-    -- try common alternates
-    local alt = container:FindFirstChild(name:lower()) or container:FindFirstChild(name:upper())
-    if alt then
-        local txt = extractText(alt)
-        if txt and txt ~= "" then return txt end
-    end
-    -- search children and grandchildren for matching names or text
-    for _, v in pairs(container:GetChildren()) do
-        if v and v.Name and type(v.Name) == "string" then
-            if v.Name:lower():find(name:lower()) then
-                local txt = extractText(v)
-                if txt and txt ~= "" then return txt end
-            end
-            for _, g in pairs(v:GetChildren()) do
-                if g and g.Name and type(g.Name) == "string" and g.Name:lower():find(name:lower()) then
-                    local txt = extractText(g)
-                    if txt and txt ~= "" then return txt end
+    -- Updater loop
+    spawn(function()
+        while true do
+            if enabled then
+                local ok, eggs = pcall(function()
+                    return getAllSpawnedEggsInfo()
+                end)
+
+                if ok and eggs and #eggs > 0 then
+                    local content = formatEggsForDisplay(eggs)
+                    pcall(function()
+                        StatusParagraph:Set({Title = "Egg Status", Content = content})
+                    end)
+                else
+                    pcall(function()
+                        StatusParagraph:Set({Title = "Egg Status", Content = "No egg detected."})
+                    end)
                 end
             end
+            wait(0.5)
         end
-    end
-    return nil
-end
-
--- Update loop
-local RunService = game:GetService("RunService")
-local updateInterval = 0.25 -- seconds
-local accumulator = 0
-
-RunService.Heartbeat:Connect(function(dt)
-    accumulator = accumulator + dt
-    if accumulator < updateInterval then return end
-    accumulator = 0
-
-    local eggModel, eggTag = findEggTag()
-    if not eggModel or not eggTag then
-        pcall(function()
-            NameParagraph:Set({Title = "Name", Content = "No egg detected"})
-            PriceParagraph:Set({Title = "Price", Content = "N/A"})
-            RarityParagraph:Set({Title = "Rarity", Content = "N/A"})
-            MutationParagraph:Set({Title = "Mutation", Content = "N/A"})
-        end)
-        return
-    end
-
-    -- Egg name is the model's name (e.g., workspace.ShinobuKocho)
-    local eggName = tostring(eggModel.Name or "Unknown")
-
-    -- Try to find Container inside the Eggtag first, then fallback to model
-    local container = nil
-    if eggTag and eggTag:FindFirstChild("Container") then
-        container = eggTag:FindFirstChild("Container")
-    else
-        container = (eggModel and eggModel:FindFirstChild("Container")) or (eggTag and eggTag:FindFirstChildWhichIsA and eggTag:FindFirstChildWhichIsA("Folder")) or (eggTag and eggTag:FindFirstChildWhichIsA and eggTag:FindFirstChildWhichIsA("Frame"))
-    end
-
-    local price = readStat(container, "Price") or "Unknown"
-    local rarity = readStat(container, "Rarity") or "Unknown"
-    -- Use "Variety" as the mutation field (user confirmed Variety == Mutation)
-    local mutation = readStat(container, "Variety") or readStat(container, "Mutation") or readStat(container, "VarietyText") or "Unknown"
-
-    -- Update UI paragraphs
-    pcall(function()
-        NameParagraph:Set({Title = "Name", Content = eggName})
-        PriceParagraph:Set({Title = "Price", Content = price})
-        RarityParagraph:Set({Title = "Rarity", Content = rarity})
-        MutationParagraph:Set({Title = "Mutation", Content = mutation})
     end)
-end)
-
--- End of script
+end
