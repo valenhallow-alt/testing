@@ -229,6 +229,9 @@ local purchaseTimeout = 6 -- seconds to wait for confirmation after purchase att
 local spawnTimeout = 6 -- seconds to wait for egg spawn after request
 local interRemoteDelay = 0.4 -- seconds between firing request and purchase when both are fired sequentially
 
+-- Debounce table to avoid repeated immediate attempts on the same egg
+local lastAttemptForParent = {}
+
 -- Helper: try to find the Instances folder and remotes; returns folder or nil + error
 local function getInstancesFolder()
     local ok, inst = pcall(function()
@@ -440,6 +443,79 @@ local function normalizeStringForRemote(s)
     return capitalized
 end
 
+-- Attempt purchase for the current egg (centralized function)
+local function attemptPurchaseCurrentEgg(force)
+    -- force = true bypasses debounce and lastPurchaseConfirmed checks
+    if not _G.AutoBuySpinEggs then return end
+    if not currentEggTag then return end
+
+    local parentName = currentParentName
+    if not parentName then return end
+
+    -- Debounce: avoid spamming the same parent within short window unless forced
+    local now = tick()
+    local last = lastAttemptForParent[parentName] or 0
+    if not force and now - last < 1.0 then
+        -- skip if attempted less than 1s ago
+        return
+    end
+    lastAttemptForParent[parentName] = now
+
+    local container = currentEggTag:FindFirstChild("Container") or currentEggTag
+    local explicitId = detectIdFromContainer(container)
+    local entityId = explicitId or buildEntityIdFromParent(parentName)
+    local rawRarity = readContainerField(container, "Rarity")
+    local rawVariety = readContainerField(container, "Variety")
+    local rarity = normalizeStringForRemote(rawRarity)
+    local variety = normalizeStringForRemote(rawVariety)
+    local price = readContainerField(container, "Price")
+    local numericPrice = tonumber(tostring(price):gsub("[^%d%.%-]","")) or nil
+
+    print("[attemptPurchaseCurrentEgg] Attempting purchase for existing egg -> Parent:", tostring(parentName), "EntityId:", tostring(entityId), "Price:", tostring(price), "Rarity:", tostring(rarity), "Variety:", tostring(variety))
+
+    if not entityId or entityId == "" then
+        print("[attemptPurchaseCurrentEgg] No entity id available; skipping purchase.")
+        return
+    end
+
+    -- Optional buy rule: you can customize or remove this
+    local buyThreshold = 1000
+    if numericPrice and numericPrice > buyThreshold then
+        print("[attemptPurchaseCurrentEgg] Price above threshold; skipping purchase.")
+        return
+    end
+
+    local ok, err = firePurchaseEgg(entityId, rarity, variety)
+    if ok then
+        local confirmed = waitForEggRemoval(purchaseTimeout)
+        if confirmed then
+            lastPurchaseConfirmed = true
+            print("[attemptPurchaseCurrentEgg] Purchase confirmed for:", entityId)
+        else
+            lastPurchaseConfirmed = false
+            print("[attemptPurchaseCurrentEgg] Purchase not confirmed within timeout for:", entityId)
+        end
+    else
+        print("[attemptPurchaseCurrentEgg] firePurchaseEgg error:", tostring(err))
+    end
+end
+
+-- Listen for manual egg spawns and attempt purchase immediately when toggle is enabled
+workspace.DescendantAdded:Connect(function(desc)
+    if desc.Name == "Eggtag" then
+        -- small delay to allow Container children to populate
+        wait(0.05)
+        pcall(refreshCurrentEgg)
+        -- If toggle is enabled, attempt to purchase this existing egg immediately
+        if _G.AutoBuySpinEggs then
+            pcall(function() attemptPurchaseCurrentEgg(true) end)
+        end
+    end
+end)
+
+-- Also attempt purchase immediately when the toggle is turned on and an egg already exists
+-- (we will call attemptPurchaseCurrentEgg from the toggle callback below)
+
 -- Auto Buy+Spin toggle logic (improved)
 _G.AutoBuySpinEggs = _G.AutoBuySpinEggs or false
 
@@ -451,53 +527,21 @@ local AutoBuySpinToggle = MainTab:CreateToggle({
         _G.AutoBuySpinEggs = Value
 
         if Value then
+            -- If an egg already exists when enabling, attempt to buy it immediately
+            pcall(refreshCurrentEgg)
+            if currentEggTag then
+                print("[AutoBuySpinToggle] Toggle enabled and egg already present; attempting immediate purchase.")
+                pcall(function() attemptPurchaseCurrentEgg(true) end)
+            end
+
             spawn(function()
                 while _G.AutoBuySpinEggs do
                     pcall(function()
                         refreshCurrentEgg()
 
                         if currentEggTag then
-                            local container = currentEggTag:FindFirstChild("Container") or currentEggTag
-                            local explicitId = detectIdFromContainer(container)
-                            local parentName = currentParentName
-                            local entityId = explicitId or buildEntityIdFromParent(parentName)
-                            local rawRarity = readContainerField(container, "Rarity")
-                            local rawVariety = readContainerField(container, "Variety")
-                            local rarity = normalizeStringForRemote(rawRarity)
-                            local variety = normalizeStringForRemote(rawVariety)
-                            local price = readContainerField(container, "Price")
-                            local numericPrice = tonumber(tostring(price):gsub("[^%d%.%-]","")) or nil
-
-                            print("[AutoBuySpin] Detected egg -> Parent:", tostring(parentName), "EntityId:", tostring(entityId), "Price:", tostring(price), "Rarity:", tostring(rarity), "Variety:", tostring(variety))
-
-                            if not entityId or entityId == "" then
-                                print("[AutoBuySpin] No entity id available; skipping purchase.")
-                            else
-                                local buy = true
-                                local buyThreshold = 1000 -- adjust threshold as needed
-                                if numericPrice and numericPrice > buyThreshold then
-                                    buy = false
-                                end
-
-                                if buy then
-                                    print("[AutoBuySpin] Attempting purchase:", entityId, rarity, variety)
-                                    local ok, err = firePurchaseEgg(entityId, rarity, variety)
-                                    if ok then
-                                        local confirmed = waitForEggRemoval(purchaseTimeout)
-                                        if confirmed then
-                                            lastPurchaseConfirmed = true
-                                            print("[AutoBuySpin] Purchase confirmed for:", entityId)
-                                        else
-                                            lastPurchaseConfirmed = false
-                                            print("[AutoBuySpin] Purchase not confirmed within timeout for:", entityId)
-                                        end
-                                    else
-                                        print("[AutoBuySpin] firePurchaseEgg error:", tostring(err))
-                                    end
-                                else
-                                    print("[AutoBuySpin] Buy conditions not met; skipping.")
-                                end
-                            end
+                            -- If an egg exists, always attempt to purchase it (this ensures manually spawned eggs are handled)
+                            attemptPurchaseCurrentEgg(false)
                         else
                             -- No egg present. Only request a new egg if last purchase was confirmed.
                             if lastPurchaseConfirmed then
@@ -512,34 +556,9 @@ local AutoBuySpinToggle = MainTab:CreateToggle({
                                     local eggtag, parentName = waitForEggSpawn(spawnTimeout)
                                     if eggtag then
                                         print("[AutoBuySpin] Egg spawned under parent:", tostring(parentName), "-> attempting immediate purchase now.")
-                                        refreshCurrentEgg()
-                                        local container = eggtag:FindFirstChild("Container") or eggtag
-                                        local explicitId = detectIdFromContainer(container)
-                                        local entityId = explicitId or buildEntityIdFromParent(parentName)
-                                        local rawRarity = readContainerField(container, "Rarity")
-                                        local rawVariety = readContainerField(container, "Variety")
-                                        local rarity = normalizeStringForRemote(rawRarity)
-                                        local variety = normalizeStringForRemote(rawVariety)
-
-                                        print("[AutoBuySpin] After request -> Detected egg info. EntityId:", tostring(entityId), "Rarity:", tostring(rarity), "Variety:", tostring(variety))
-
-                                        if entityId and entityId ~= "" then
-                                            local ok2, err2 = firePurchaseEgg(entityId, rarity, variety)
-                                            if ok2 then
-                                                local confirmed = waitForEggRemoval(purchaseTimeout)
-                                                if confirmed then
-                                                    lastPurchaseConfirmed = true
-                                                    print("[AutoBuySpin] Purchase confirmed for:", entityId)
-                                                else
-                                                    lastPurchaseConfirmed = false
-                                                    print("[AutoBuySpin] Purchase not confirmed within timeout for:", entityId)
-                                                end
-                                            else
-                                                print("[AutoBuySpin] firePurchaseEgg error after request:", tostring(err2))
-                                            end
-                                        else
-                                            print("[AutoBuySpin] No entity id after request; skipping purchase.")
-                                        end
+                                        pcall(refreshCurrentEgg)
+                                        -- Attempt purchase for the newly spawned egg
+                                        attemptPurchaseCurrentEgg(true)
                                     else
                                         print("[AutoBuySpin] Egg did not spawn within timeout after request.")
                                     end
@@ -547,6 +566,7 @@ local AutoBuySpinToggle = MainTab:CreateToggle({
                                     print("[AutoBuySpin] fireRequestEgg error:", tostring(err))
                                 end
                             else
+                                -- If last purchase not confirmed, wait and re-check; do not request a new egg
                                 print("[AutoBuySpin] Waiting for previous purchase confirmation before requesting new egg.")
                             end
                         end
