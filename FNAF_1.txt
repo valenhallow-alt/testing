@@ -83,13 +83,12 @@ end
 pcall(function() Rayfield:LoadConfiguration() end)
 
 -- =========================
--- Egg Stats tab (was "Main")
+-- Egg Stats tab
 -- =========================
 
-local EggTab = Window:CreateTab("Egg Stats", 4483362458) -- Title, Image
+local EggTab = Window:CreateTab("Egg Stats", 4483362458)
 local EggSection = EggTab:CreateSection("Egg Information")
 
--- Labels to display egg info
 local ParentLabel = EggTab:CreateLabel("Parent: N/A", 4483362458, Color3.fromRGB(255,255,255), false)
 local PriceLabel = EggTab:CreateLabel("Price: N/A", 4483362458, Color3.fromRGB(255,255,255), false)
 local RarityLabel = EggTab:CreateLabel("Rarity: N/A", 4483362458, Color3.fromRGB(255,255,255), false)
@@ -157,7 +156,6 @@ local function updateEggInfo(eggtag, parentName)
     VarietyLabel:Set("Variety: " .. tostring(variety))
 end
 
--- Track current eggtag and parent
 local currentEggTag = nil
 local currentParentName = nil
 
@@ -172,7 +170,6 @@ local function refreshCurrentEgg()
     end
 end
 
--- Listen for workspace changes to update egg info quickly
 workspace.DescendantAdded:Connect(function(desc)
     if desc.Name == "Eggtag" then
         wait(0.05)
@@ -186,7 +183,6 @@ workspace.DescendantRemoving:Connect(function(desc)
     end
 end)
 
--- Bind listeners to container children/values for faster updates
 local function bindContainerListeners(eggtag)
     if not eggtag then return end
     local container = eggtag:FindFirstChild("Container") or eggtag
@@ -210,7 +206,6 @@ local function bindContainerListeners(eggtag)
     end
 end
 
--- Periodic poll as a fallback
 spawn(function()
     while true do
         pcall(function()
@@ -222,7 +217,7 @@ spawn(function()
 end)
 
 -- =========================
--- Main tab (new) + Auto Buy toggle moved here
+-- Main tab + Auto Buy toggle
 -- =========================
 
 local MainTab = Window:CreateTab("Main", 4483362458)
@@ -231,63 +226,86 @@ local MainSection = MainTab:CreateSection("Automation")
 -- State used to ensure we don't request a new egg until the current one is confirmed purchased
 local lastPurchaseConfirmed = true
 local purchaseTimeout = 6 -- seconds to wait for confirmation after purchase attempt
+local spawnTimeout = 6 -- seconds to wait for egg spawn after request
 
--- Helper: build id from parent name (customize mapping if needed)
-local function buildEntityIdFromParent(parentName)
-    if not parentName then return nil end
-    -- Normalize: lowercase and replace spaces with underscores
-    local normalized = tostring(parentName):gsub("%s+", "_")
-    normalized = normalized:gsub("[^%w_]", "") -- remove non-alphanumeric/underscore
-    normalized = string.lower(normalized)
-    -- Construct id pattern: entity_<normalized>_egg
-    return "entity_" .. normalized .. "_egg"
+-- Helper: try to find the Instances folder and remotes; returns table with remotes or nil + error
+local function getInstancesFolder()
+    local ok, inst = pcall(function()
+        local rs = game:GetService("ReplicatedStorage")
+        local modules = rs:WaitForChild("Modules", 2)
+        if not modules then error("Modules not found") end
+        local internals = modules:WaitForChild("Internals", 2)
+        if not internals then error("Internals not found") end
+        local skeleton = internals:WaitForChild("Skeleton", 2)
+        if not skeleton then error("Skeleton not found") end
+        local conduit = skeleton:WaitForChild("Conduit", 2)
+        if not conduit then error("Conduit not found") end
+        local instances = conduit:WaitForChild("Instances", 2)
+        if not instances then error("Instances not found") end
+        return instances
+    end)
+    if ok then return inst end
+    return nil, inst
 end
 
 -- Helper: fire _requestEgg remote
 local function fireRequestEgg()
-    local ok, err = pcall(function()
+    local instances, err = getInstancesFolder()
+    if not instances then
+        return false, "Instances folder not found: " .. tostring(err)
+    end
+    local req = instances:FindFirstChild("_requestEgg")
+    if not req then
+        return false, "_requestEgg remote not found in Instances"
+    end
+    local ok, res = pcall(function()
         local args = {
             {
                 __raw = true,
                 data = {}
             }
         }
-        local inst = game:GetService("ReplicatedStorage"):WaitForChild("Modules"):WaitForChild("Internals"):WaitForChild("Skeleton"):WaitForChild("Conduit"):WaitForChild("Instances")
-        local req = inst:FindFirstChild("_requestEgg")
-        if req and req.FireServer then
+        -- Use FireServer if available
+        if req.FireServer then
             req:FireServer(unpack(args))
         else
-            error("_requestEgg remote not found")
+            error("_requestEgg does not have FireServer")
         end
     end)
-    return ok, err
+    return ok, res
 end
 
 -- Helper: fire _purchaseEgg remote with id, rarity, variety
 local function firePurchaseEgg(id, rarity, variety)
-    local ok, err = pcall(function()
+    local instances, err = getInstancesFolder()
+    if not instances then
+        return false, "Instances folder not found: " .. tostring(err)
+    end
+    local pur = instances:FindFirstChild("_purchaseEgg")
+    if not pur then
+        return false, "_purchaseEgg remote not found in Instances"
+    end
+    local ok, res = pcall(function()
         local args = {
             {
                 __raw = true,
                 data = {
-                    id = id,
+                    id = tostring(id or ""),
                     rarity = tostring(rarity or ""),
                     variety = tostring(variety or "")
                 }
             }
         }
-        local inst = game:GetService("ReplicatedStorage"):WaitForChild("Modules"):WaitForChild("Internals"):WaitForChild("Skeleton"):WaitForChild("Conduit"):WaitForChild("Instances")
-        local pur = inst:FindFirstChild("_purchaseEgg")
-        if pur and pur.FireServer then
+        if pur.FireServer then
             pur:FireServer(unpack(args))
         else
-            error("_purchaseEgg remote not found")
+            error("_purchaseEgg does not have FireServer")
         end
     end)
-    return ok, err
+    return ok, res
 end
 
--- Utility: wait for egg removal (confirmation of purchase) up to timeout seconds
+-- Wait for egg removal (confirmation of purchase) up to timeout seconds
 local function waitForEggRemoval(timeout)
     local start = tick()
     while tick() - start < (timeout or purchaseTimeout) do
@@ -300,7 +318,61 @@ local function waitForEggRemoval(timeout)
     return false
 end
 
--- Auto Buy+Spin toggle logic
+-- Wait for egg spawn (presence of Eggtag) up to timeout seconds
+local function waitForEggSpawn(timeout)
+    local start = tick()
+    while tick() - start < (timeout or spawnTimeout) do
+        local eggtag, parentName = findEggTag()
+        if eggtag then
+            return eggtag, parentName
+        end
+        wait(0.15)
+    end
+    return nil, nil
+end
+
+-- Try to detect explicit entity id inside the egg container (if the game exposes it)
+local function detectIdFromContainer(container)
+    if not container then return nil end
+    -- Common possible fields: "Id", "EntityId", "id", "Identifier"
+    local candidates = {"Id","id","EntityId","entityId","Identifier","identifier"}
+    for _, name in ipairs(candidates) do
+        local v = readContainerField(container, name)
+        if v and tostring(v) ~= "" then
+            return tostring(v)
+        end
+    end
+    return nil
+end
+
+-- Build id from parent name as fallback
+local function buildEntityIdFromParent(parentName)
+    if not parentName then return nil end
+    -- mapping table for known exceptions (add entries if you know them)
+    local mapping = {
+        -- ["Lalatina"] = "entity_Nami_egg", -- example: add mappings here if needed
+    }
+    if mapping[parentName] then
+        return mapping[parentName]
+    end
+    local normalized = tostring(parentName):gsub("%s+", "_")
+    normalized = normalized:gsub("[^%w_]", "")
+    normalized = string.lower(normalized)
+    return "entity_" .. normalized .. "_egg"
+end
+
+-- Normalize rarity/variety strings to expected casing (attempt common formats)
+local function normalizeStringForRemote(s)
+    if not s then return "" end
+    s = tostring(s)
+    s = s:gsub("^%s*(.-)%s*$", "%1") -- trim
+    -- Common expected forms: "Rare", "Common", "Normal", etc. Capitalize first letter
+    local lower = string.lower(s)
+    local capitalized = lower:gsub("(%a)([%w_']*)", function(a,b) return string.upper(a) .. b end)
+    return capitalized
+end
+
+-- Auto Buy+Spin toggle logic (improved)
 _G.AutoBuySpinEggs = _G.AutoBuySpinEggs or false
 
 local AutoBuySpinToggle = MainTab:CreateToggle({
@@ -317,57 +389,73 @@ local AutoBuySpinToggle = MainTab:CreateToggle({
                         -- Refresh egg info
                         refreshCurrentEgg()
 
-                        -- Read current stats
-                        local parentName = currentParentName
-                        local container = currentEggTag and (currentEggTag:FindFirstChild("Container") or currentEggTag) or nil
-                        local price = container and readContainerField(container, "Price") or nil
-                        local rarity = container and readContainerField(container, "Rarity") or nil
-                        local variety = container and readContainerField(container, "Variety") or nil
-
-                        -- Build id from parentName
-                        local entityId = buildEntityIdFromParent(parentName)
-
-                        -- If there is an egg present and it matches desired criteria, attempt purchase
-                        -- Example rule: if price is numeric and <= threshold OR rarity matches desired; customize as needed
-                        local numericPrice = tonumber(tostring(price)) or nil
-                        local buyThreshold = 100 -- adjust as needed
-
-                        -- If an egg exists and we haven't purchased it yet, attempt purchase
+                        -- If an egg exists, attempt purchase using detected info
                         if currentEggTag then
-                            -- Fire purchase remote directly using detected stats
-                            if entityId and rarity and variety then
-                                -- Attempt purchase
-                                local ok, err = firePurchaseEgg(entityId, rarity, variety)
-                                if ok then
-                                    -- After firing purchase, wait for confirmation (egg removal)
-                                    local confirmed = waitForEggRemoval(purchaseTimeout)
-                                    if confirmed then
-                                        lastPurchaseConfirmed = true
-                                        print("[AutoBuySpin] Purchase confirmed for:", entityId, rarity, variety)
+                            local container = currentEggTag:FindFirstChild("Container") or currentEggTag
+                            -- Try to detect explicit id first
+                            local explicitId = detectIdFromContainer(container)
+                            local parentName = currentParentName
+                            local entityId = explicitId or buildEntityIdFromParent(parentName)
+                            local rawRarity = readContainerField(container, "Rarity")
+                            local rawVariety = readContainerField(container, "Variety")
+                            local rarity = normalizeStringForRemote(rawRarity)
+                            local variety = normalizeStringForRemote(rawVariety)
+                            local price = readContainerField(container, "Price")
+                            local numericPrice = tonumber(tostring(price)) or nil
+
+                            print("[AutoBuySpin] Detected egg -> Parent:", tostring(parentName), "EntityId:", tostring(entityId), "Price:", tostring(price), "Rarity:", tostring(rarity), "Variety:", tostring(variety))
+
+                            if not entityId or entityId == "" then
+                                print("[AutoBuySpin] No entity id available; skipping purchase.")
+                            else
+                                -- Optional: simple buy rule (customize)
+                                local buy = true
+                                -- Example: only buy if numeric price <= threshold (if price exists)
+                                local buyThreshold = 100
+                                if numericPrice and numericPrice > buyThreshold then
+                                    buy = false
+                                end
+
+                                if buy then
+                                    print("[AutoBuySpin] Attempting purchase:", entityId, rarity, variety)
+                                    local ok, err = firePurchaseEgg(entityId, rarity, variety)
+                                    if ok then
+                                        -- Wait for confirmation (egg removal)
+                                        local confirmed = waitForEggRemoval(purchaseTimeout)
+                                        if confirmed then
+                                            lastPurchaseConfirmed = true
+                                            print("[AutoBuySpin] Purchase confirmed for:", entityId)
+                                        else
+                                            lastPurchaseConfirmed = false
+                                            print("[AutoBuySpin] Purchase not confirmed within timeout for:", entityId)
+                                        end
                                     else
-                                        lastPurchaseConfirmed = false
-                                        print("[AutoBuySpin] Purchase not confirmed within timeout for:", entityId, rarity, variety)
+                                        print("[AutoBuySpin] firePurchaseEgg error:", tostring(err))
                                     end
                                 else
-                                    print("[AutoBuySpin] Purchase remote error:", err)
+                                    print("[AutoBuySpin] Buy conditions not met; skipping.")
                                 end
-                            else
-                                print("[AutoBuySpin] Missing entityId/rarity/variety; skipping purchase. Parent:", tostring(parentName), "Rarity:", tostring(rarity), "Variety:", tostring(variety))
                             end
                         else
                             -- No egg present. Only request a new egg if last purchase was confirmed.
                             if lastPurchaseConfirmed then
+                                print("[AutoBuySpin] No egg present. Requesting new egg via _requestEgg.")
                                 local ok, err = fireRequestEgg()
                                 if ok then
-                                    -- After requesting, set lastPurchaseConfirmed to false until we confirm a purchase
                                     lastPurchaseConfirmed = false
-                                    -- Wait a short moment for the egg to spawn before next loop
-                                    wait(0.5)
+                                    -- Wait for egg to spawn
+                                    local eggtag, parentName = waitForEggSpawn(spawnTimeout)
+                                    if eggtag then
+                                        print("[AutoBuySpin] Egg spawned under parent:", tostring(parentName))
+                                        -- Immediately attempt purchase on the spawned egg in next loop iteration (or attempt now)
+                                        -- We'll attempt purchase in the next loop iteration to ensure container fields populate
+                                    else
+                                        print("[AutoBuySpin] Egg did not spawn within timeout after request.")
+                                    end
                                 else
-                                    print("[AutoBuySpin] RequestEgg error:", err)
+                                    print("[AutoBuySpin] fireRequestEgg error:", tostring(err))
                                 end
                             else
-                                -- Waiting for previous purchase confirmation; skip requesting new egg
                                 print("[AutoBuySpin] Waiting for previous purchase confirmation before requesting new egg.")
                             end
                         end
