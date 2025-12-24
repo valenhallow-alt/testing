@@ -47,8 +47,6 @@ do
     local Corner = Instance.new("UICorner")
 
     ST.Name = "Toggle UnHub"
-    -- Parent to the same UI context Rayfield uses so it appears alongside the Rayfield UI
-    -- If Rayfield:GetParent() or its parent is nil, fall back to CoreGui
     local parentGui = nil
     pcall(function()
         parentGui = Rayfield:GetParent() and Rayfield:GetParent().Parent
@@ -64,7 +62,7 @@ do
     T.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
     T.Position = UDim2.new(0, 30, 0.08, 0)
     T.Size = UDim2.new(0, 50, 0, 50)
-    T.Image = "rbxassetid://112045743772867" -- replace with your decal id if desired
+    T.Image = "rbxassetid://112045743772867"
     T.Active = true
     T.Draggable = true
     T.AutoButtonColor = true
@@ -73,7 +71,6 @@ do
     Corner.Parent = T
     Corner.CornerRadius = UDim.new(0, 8)
 
-    -- Toggle Rayfield visibility on click
     T.MouseButton1Click:Connect(function()
         local ok, enabled = pcall(function() return Rayfield:GetEnable() end)
         if ok then
@@ -94,22 +91,99 @@ do
     -- Always enabled; user cannot disable
     local enabled = true
 
-    -- Helper to read a text-like child safely
+    -- Robust reader: returns text/value from common GUI/value objects
     local function readTextOrValue(inst)
         if not inst then return nil end
-        -- Common GUI text objects
+
+        -- Direct text properties
         if inst:IsA("TextLabel") or inst:IsA("TextBox") or inst:IsA("TextButton") then
-            return inst.Text
+            if type(inst.Text) == "string" and inst.Text ~= "" then
+                return inst.Text
+            end
         end
-        -- Value objects (StringValue, IntValue, NumberValue, etc.)
+
+        -- ValueBase (StringValue, IntValue, NumberValue, BoolValue)
         if inst:IsA("ValueBase") and inst.Value ~= nil then
             return tostring(inst.Value)
         end
-        -- Try common properties safely
+
+        -- Some objects may store text in a child named "Text" or "Value"
         local ok, txt = pcall(function() return inst.Text end)
         if ok and type(txt) == "string" and txt ~= "" then return txt end
         local ok2, val = pcall(function() return inst.Value end)
         if ok2 and val ~= nil then return tostring(val) end
+
+        -- Try to find a child that is a TextLabel/TextBox/TextButton
+        for _, c in ipairs(inst:GetChildren()) do
+            if c:IsA("TextLabel") or c:IsA("TextBox") or c:IsA("TextButton") then
+                if type(c.Text) == "string" and c.Text ~= "" then
+                    return c.Text
+                end
+            end
+            if c:IsA("ValueBase") and c.Value ~= nil then
+                return tostring(c.Value)
+            end
+        end
+
+        -- Try descendants as a last resort (shallow search)
+        for _, d in ipairs(inst:GetDescendants()) do
+            if d:IsA("TextLabel") or d:IsA("TextBox") or d:IsA("TextButton") then
+                if type(d.Text) == "string" and d.Text ~= "" then
+                    return d.Text
+                end
+            end
+            if d:IsA("ValueBase") and d.Value ~= nil then
+                return tostring(d.Value)
+            end
+        end
+
+        return nil
+    end
+
+    -- Search container for a field by name (case-insensitive) and return its readable value
+    local function findFieldValue(container, nameCandidates)
+        if not container then return nil end
+        local lowerCandidates = {}
+        for _, n in ipairs(nameCandidates) do lowerCandidates[#lowerCandidates+1] = string.lower(n) end
+
+        -- Check direct children first
+        for _, child in ipairs(container:GetChildren()) do
+            local lname = string.lower(child.Name or "")
+            for _, cand in ipairs(lowerCandidates) do
+                if lname == cand or lname:find(cand) then
+                    local v = readTextOrValue(child)
+                    if v and v ~= "" then return v end
+                end
+            end
+        end
+
+        -- Check descendants (shallow)
+        for _, desc in ipairs(container:GetDescendants()) do
+            local lname = string.lower(desc.Name or "")
+            for _, cand in ipairs(lowerCandidates) do
+                if lname == cand or lname:find(cand) then
+                    local v = readTextOrValue(desc)
+                    if v and v ~= "" then return v end
+                end
+            end
+        end
+
+        -- If no named child found, try any child that yields readable text
+        for _, child in ipairs(container:GetChildren()) do
+            local v = readTextOrValue(child)
+            if v and v ~= "" then
+                return v
+            end
+        end
+
+        -- Finally try descendants for any readable text
+        for _, desc in ipairs(container:GetDescendants()) do
+            local v = readTextOrValue(desc)
+            if v and v ~= "" then
+                return v
+            end
+        end
+
         return nil
     end
 
@@ -121,9 +195,13 @@ do
                 local tag = child:FindFirstChild("Eggtag")
                 if tag and tag:FindFirstChild("Container") then
                     local container = tag.Container
-                    local price = readTextOrValue(container:FindFirstChild("Price")) or "N/A"
-                    local rarity = readTextOrValue(container:FindFirstChild("Rarity")) or "N/A"
-                    local variety = readTextOrValue(container:FindFirstChild("Variety")) or readTextOrValue(container:FindFirstChild("Mutation")) or "N/A"
+
+                    -- Use robust field search with multiple candidate names
+                    local price = findFieldValue(container, {"Price", "price", "Cost", "cost", "Amount"}) or "N/A"
+                    local rarity = findFieldValue(container, {"Rarity", "rarity", "Tier", "tier"}) or "N/A"
+                    -- Prefer "Variety" label; do not rely on "Mutation" label anymore
+                    local variety = findFieldValue(container, {"Variety", "variety", "Type", "type"}) or "N/A"
+
                     local eggName = tostring(child.Name or "Unknown")
                     table.insert(results, {Name = eggName, Price = price, Rarity = rarity, Variety = variety, Container = container})
                 end
@@ -139,7 +217,7 @@ do
         end
         local lines = {}
         for i, e in ipairs(eggs) do
-            local line = string.format("%d) Name: %s | Price: %s | Rarity: %s | Mutation: %s", i, tostring(e.Name), tostring(e.Price), tostring(e.Rarity), tostring(e.Variety))
+            local line = string.format("%d) Name: %s | Price: %s | Rarity: %s | Variety: %s", i, tostring(e.Name), tostring(e.Price), tostring(e.Rarity), tostring(e.Variety))
             table.insert(lines, line)
         end
         return table.concat(lines, "\n")
@@ -226,6 +304,7 @@ do
 
                 -- 3) If detected, attempt purchase
                 if detectedEgg and purchaseEggRemote then
+                    -- Ensure we use the extracted fields directly (no debug strings)
                     local namePart = sanitizeNameForId(detectedEgg.Name or "Unknown")
                     local rarityPart = tostring(detectedEgg.Rarity or "Basic")
                     local varietyPart = tostring(detectedEgg.Variety or "Glitch")
@@ -265,14 +344,11 @@ do
             Callback = function(val)
                 autoEnabled = val
                 if autoEnabled then
-                    -- start loop in a new thread if not already running
                     if not autoThread or coroutine.status(autoThread) ~= "running" then
                         autoThread = spawn(function()
                             autoSpawnBuyLoop()
                         end)
                     end
-                else
-                    -- disabling will cause loop to exit naturally
                 end
             end
         })
