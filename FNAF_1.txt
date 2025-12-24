@@ -161,10 +161,10 @@ local currentParentName = nil
 
 -- Timing and retry configuration (tweak these to control speed/behavior)
 local interRemoteDelay = 0.4        -- delay between request and purchase attempts (seconds)
-local spawnTimeout = 0.6              -- how long to wait for an egg to spawn after request (seconds)
-local purchaseTimeout = 0.5           -- how long to wait for egg removal after purchase attempt (seconds)
-local loopRetryInterval = 0.6       -- main loop retry interval (seconds)
-local requestRetryInterval = 0.6    -- how often to retry _requestEgg when continuously requesting (seconds)
+local spawnTimeout = 6              -- how long to wait for an egg to spawn after request (seconds)
+local purchaseTimeout = 6           -- how long to wait for egg removal after purchase attempt (seconds)
+local loopRetryInterval = 0.8       -- main loop retry interval (seconds)
+local requestRetryInterval = 0.8    -- how often to retry _requestEgg when continuously requesting (seconds)
 local maxRequestAttempts = nil      -- nil = unlimited; or set a number to cap repeated requests
 
 -- Forward declaration so refreshCurrentEgg can be referenced inside listeners
@@ -219,6 +219,10 @@ workspace.DescendantAdded:Connect(function(desc)
     end
 end)
 
+-- State flags
+local lastPurchaseConfirmed = true
+local purchaseInProgress = false
+
 -- When an egg is removed (manually bought or otherwise), treat it as a confirmed purchase so the state machine continues
 workspace.DescendantRemoving:Connect(function(desc)
     if desc.Name == "Eggtag" then
@@ -251,10 +255,6 @@ end)
 
 local MainTab = Window:CreateTab("Main", 4483362458)
 local MainSection = MainTab:CreateSection("Automation")
-
--- State used to ensure we don't request a new egg until the current one is confirmed purchased
-local lastPurchaseConfirmed = true
-local purchaseInProgress = false
 
 -- Helper: try to find the Instances folder and remotes; returns folder or nil + error
 local function getInstancesFolder()
@@ -467,6 +467,66 @@ local function normalizeStringForRemote(s)
     return capitalized
 end
 
+-- Spawn requester control
+local spawnRequesterActive = false
+
+local function startSpawnRequester()
+    if spawnRequesterActive then return end
+    spawnRequesterActive = true
+    spawn(function()
+        local attempts = 0
+        while spawnRequesterActive and _G.AutoBuySpinEggs do
+            -- If an egg exists, stop requester
+            local eggtagCheck, parentCheck = findEggTag()
+            if eggtagCheck then
+                -- egg present; stop requester
+                break
+            end
+
+            -- If a purchase is in progress, wait and retry
+            if purchaseInProgress then
+                wait(requestRetryInterval)
+                goto continue
+            end
+
+            -- Optional attempt cap
+            attempts = attempts + 1
+            if maxRequestAttempts and attempts > maxRequestAttempts then
+                print("[SpawnRequester] Reached max request attempts; stopping requester.")
+                break
+            end
+
+            -- Fire request
+            local ok, err = fireRequestEgg()
+            if not ok then
+                print("[SpawnRequester] fireRequestEgg error:", tostring(err))
+            else
+                -- mark pending so main loop doesn't request again immediately
+                lastPurchaseConfirmed = false
+            end
+
+            -- small delay to allow server to spawn
+            wait(interRemoteDelay)
+
+            -- quick check for spawn
+            local eggtag, parentName = waitForEggSpawn(math.min(spawnTimeout, requestRetryInterval))
+            if eggtag then
+                print("[SpawnRequester] Egg spawned after request under parent:", tostring(parentName))
+                refreshCurrentEgg()
+                break
+            end
+
+            wait(requestRetryInterval)
+            ::continue::
+        end
+        spawnRequesterActive = false
+    end)
+end
+
+local function stopSpawnRequester()
+    spawnRequesterActive = false
+end
+
 -- Auto Buy+Spin toggle logic (improved)
 _G.AutoBuySpinEggs = _G.AutoBuySpinEggs or false
 
@@ -532,59 +592,34 @@ local AutoBuySpinToggle = MainTab:CreateToggle({
                                 end
                             end
 
+                            -- If a spawn requester was running, stop it because we have an egg now
+                            if spawnRequesterActive then
+                                stopSpawnRequester()
+                            end
+
                         else
-                            -- No egg present. Only request a new egg if last purchase was confirmed.
+                            -- No egg present. Start the spawn requester if allowed and last purchase was confirmed
                             if lastPurchaseConfirmed then
-                                print("[AutoBuySpin] No egg present. Entering request loop to spawn an egg.")
-                                local attempts = 0
-                                while _G.AutoBuySpinEggs do
-                                    -- stop if an egg appears
-                                    local eggtagCheck, parentCheck = findEggTag()
-                                    if eggtagCheck then
-                                        print("[AutoBuySpin] Egg detected during request loop under parent:", tostring(parentCheck))
-                                        refreshCurrentEgg()
-                                        break
-                                    end
-
-                                    -- optional attempt cap
-                                    attempts = attempts + 1
-                                    if maxRequestAttempts and attempts > maxRequestAttempts then
-                                        print("[AutoBuySpin] Reached max request attempts (" .. tostring(maxRequestAttempts) .. "). Stopping request loop.")
-                                        break
-                                    end
-
-                                    -- fire request
-                                    local ok, err = fireRequestEgg()
-                                    if not ok then
-                                        print("[AutoBuySpin] fireRequestEgg error:", tostring(err), "Will retry after delay.")
-                                    else
-                                        -- we requested an egg; mark pending so we don't spam purchases
-                                        lastPurchaseConfirmed = false
-                                    end
-
-                                    -- small delay between request and spawn-check to avoid immediate re-fire
-                                    wait(interRemoteDelay)
-
-                                    -- quick spawn check using waitForEggSpawn with a short timeout to detect immediate spawns
-                                    local eggtag, parentName = waitForEggSpawn(math.min(spawnTimeout, requestRetryInterval))
-                                    if eggtag then
-                                        print("[AutoBuySpin] Egg spawned after request under parent:", tostring(parentName))
-                                        refreshCurrentEgg()
-                                        break
-                                    end
-
-                                    -- wait before next request attempt
-                                    wait(requestRetryInterval)
+                                -- ensure only one requester runs
+                                if not spawnRequesterActive then
+                                    print("[AutoBuySpin] No egg present and last purchase confirmed. Starting spawn requester.")
+                                    startSpawnRequester()
                                 end
+                                -- requester will handle repeated requests; main loop can wait and re-check
                             else
                                 -- We are waiting for the previous purchase to confirm (or retrying). Do nothing.
-                                -- This prevents requesting a new egg while the previous one is still pending.
                             end
                         end
                     end)
                     wait(loopRetryInterval) -- retry interval; adjust if you need faster/slower retries
                 end
+
+                -- When toggle is turned off, ensure requester stops
+                stopSpawnRequester()
             end)
+        else
+            -- toggle turned off: stop requester
+            stopSpawnRequester()
         end
     end,
 })
