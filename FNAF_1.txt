@@ -246,8 +246,8 @@ local MainSection = MainTab:CreateSection("Automation")
 
 -- State used to ensure we don't request a new egg until the current one is confirmed purchased
 local lastPurchaseConfirmed = true
-local purchaseTimeout = 0.5 -- seconds to wait for confirmation after purchase attempt
-local spawnTimeout = 0.5 -- seconds to wait for egg spawn after request
+local purchaseTimeout = 0.3 -- seconds to wait for confirmation after purchase attempt
+local spawnTimeout = 0.1 -- seconds to wait for egg spawn after request
 local interRemoteDelay = 0.4 -- seconds between firing request and purchase when both are fired sequentially
 
 -- Flag to avoid firing multiple purchase attempts in parallel for the same egg
@@ -566,7 +566,7 @@ local AutoBuySpinToggle = MainTab:CreateToggle({
                             end
                         end
                     end)
-                    wait(0.8) -- retry interval; adjust if you need faster/slower retries
+                    wait(0.3) -- retry interval; adjust if you need faster/slower retries
                 end
             end)
         end
