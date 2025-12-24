@@ -47,8 +47,6 @@ do
     local Corner = Instance.new("UICorner")
 
     ST.Name = "Toggle UnHub"
-    -- Parent to the same UI context Rayfield uses so it appears alongside the Rayfield UI
-    -- If Rayfield:GetParent() or its parent is nil, fall back to CoreGui
     local parentGui = nil
     pcall(function()
         parentGui = Rayfield:GetParent() and Rayfield:GetParent().Parent
@@ -64,7 +62,7 @@ do
     T.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
     T.Position = UDim2.new(0, 30, 0.08, 0)
     T.Size = UDim2.new(0, 50, 0, 50)
-    T.Image = "rbxassetid://112045743772867" -- replace with your decal id if desired
+    T.Image = "rbxassetid://112045743772867"
     T.Active = true
     T.Draggable = true
     T.AutoButtonColor = true
@@ -73,7 +71,6 @@ do
     Corner.Parent = T
     Corner.CornerRadius = UDim.new(0, 8)
 
-    -- Toggle Rayfield visibility on click
     T.MouseButton1Click:Connect(function()
         local ok, enabled = pcall(function() return Rayfield:GetEnable() end)
         if ok then
@@ -86,17 +83,17 @@ end
 pcall(function() Rayfield:LoadConfiguration() end)
 
 -- =========================
--- Main tab + egg-info UI
+-- Egg Stats tab (was "Main")
 -- =========================
 
-local MainTab = Window:CreateTab("Main", 4483362458) -- Title, Image
-local MainSection = MainTab:CreateSection("Main Controls")
+local EggTab = Window:CreateTab("Egg Stats", 4483362458) -- Title, Image
+local EggSection = EggTab:CreateSection("Egg Information")
 
 -- Labels to display egg info
-local ParentLabel = MainTab:CreateLabel("Parent: N/A", 4483362458, Color3.fromRGB(255,255,255), false)
-local PriceLabel = MainTab:CreateLabel("Price: N/A", 4483362458, Color3.fromRGB(255,255,255), false)
-local RarityLabel = MainTab:CreateLabel("Rarity: N/A", 4483362458, Color3.fromRGB(255,255,255), false)
-local VarietyLabel = MainTab:CreateLabel("Variety: N/A", 4483362458, Color3.fromRGB(255,255,255), false)
+local ParentLabel = EggTab:CreateLabel("Parent: N/A", 4483362458, Color3.fromRGB(255,255,255), false)
+local PriceLabel = EggTab:CreateLabel("Price: N/A", 4483362458, Color3.fromRGB(255,255,255), false)
+local RarityLabel = EggTab:CreateLabel("Rarity: N/A", 4483362458, Color3.fromRGB(255,255,255), false)
+local VarietyLabel = EggTab:CreateLabel("Variety: N/A", 4483362458, Color3.fromRGB(255,255,255), false)
 
 -- Helper: safely read a property from a container (handles Value objects, TextLabels, StringValues, etc.)
 local function readContainerField(container, fieldName)
@@ -124,14 +121,12 @@ end
 
 -- Find the current Eggtag and its parent name
 local function findEggTag()
-    -- First check direct children of workspace
     for _, child in ipairs(workspace:GetChildren()) do
         local eggtag = child:FindFirstChild("Eggtag")
         if eggtag then
             return eggtag, child.Name
         end
     end
-    -- Fallback: search descendants
     for _, desc in ipairs(workspace:GetDescendants()) do
         if desc.Name == "Eggtag" then
             local parent = desc.Parent
@@ -173,7 +168,6 @@ local function refreshCurrentEgg()
         currentParentName = parentName
         updateEggInfo(currentEggTag, currentParentName)
     else
-        -- still update fields in case values changed
         updateEggInfo(currentEggTag, currentParentName)
     end
 end
@@ -192,11 +186,10 @@ workspace.DescendantRemoving:Connect(function(desc)
     end
 end)
 
--- Also listen for changes inside the current egg's Container to update labels faster
+-- Bind listeners to container children/values for faster updates
 local function bindContainerListeners(eggtag)
     if not eggtag then return end
     local container = eggtag:FindFirstChild("Container") or eggtag
-    -- Disconnect previous listeners by recreating connections table per container
     if container._rayfield_listeners then
         for _, conn in ipairs(container._rayfield_listeners) do
             pcall(function() conn:Disconnect() end)
@@ -204,13 +197,11 @@ local function bindContainerListeners(eggtag)
     end
     container._rayfield_listeners = {}
 
-    -- Watch for child added/removed/changed inside container
     local added = container.ChildAdded:Connect(function() pcall(refreshCurrentEgg) end)
     local removed = container.ChildRemoved:Connect(function() pcall(refreshCurrentEgg) end)
     table.insert(container._rayfield_listeners, added)
     table.insert(container._rayfield_listeners, removed)
 
-    -- If there are Value/Text objects, watch their Changed events
     for _, obj in ipairs(container:GetChildren()) do
         if obj:IsA("StringValue") or obj:IsA("NumberValue") or obj:IsA("IntValue") or obj:IsA("BoolValue") or obj:IsA("TextLabel") or obj:IsA("TextBox") then
             local conn = obj.Changed:Connect(function() pcall(refreshCurrentEgg) end)
@@ -219,7 +210,7 @@ local function bindContainerListeners(eggtag)
     end
 end
 
--- Periodic poll as a fallback (keeps UI in sync)
+-- Periodic poll as a fallback
 spawn(function()
     while true do
         pcall(function()
@@ -231,9 +222,85 @@ spawn(function()
 end)
 
 -- =========================
--- Auto Buy+Spin Eggs toggle
+-- Main tab (new) + Auto Buy toggle moved here
 -- =========================
 
+local MainTab = Window:CreateTab("Main", 4483362458)
+local MainSection = MainTab:CreateSection("Automation")
+
+-- State used to ensure we don't request a new egg until the current one is confirmed purchased
+local lastPurchaseConfirmed = true
+local purchaseTimeout = 6 -- seconds to wait for confirmation after purchase attempt
+
+-- Helper: build id from parent name (customize mapping if needed)
+local function buildEntityIdFromParent(parentName)
+    if not parentName then return nil end
+    -- Normalize: lowercase and replace spaces with underscores
+    local normalized = tostring(parentName):gsub("%s+", "_")
+    normalized = normalized:gsub("[^%w_]", "") -- remove non-alphanumeric/underscore
+    normalized = string.lower(normalized)
+    -- Construct id pattern: entity_<normalized>_egg
+    return "entity_" .. normalized .. "_egg"
+end
+
+-- Helper: fire _requestEgg remote
+local function fireRequestEgg()
+    local ok, err = pcall(function()
+        local args = {
+            {
+                __raw = true,
+                data = {}
+            }
+        }
+        local inst = game:GetService("ReplicatedStorage"):WaitForChild("Modules"):WaitForChild("Internals"):WaitForChild("Skeleton"):WaitForChild("Conduit"):WaitForChild("Instances")
+        local req = inst:FindFirstChild("_requestEgg")
+        if req and req.FireServer then
+            req:FireServer(unpack(args))
+        else
+            error("_requestEgg remote not found")
+        end
+    end)
+    return ok, err
+end
+
+-- Helper: fire _purchaseEgg remote with id, rarity, variety
+local function firePurchaseEgg(id, rarity, variety)
+    local ok, err = pcall(function()
+        local args = {
+            {
+                __raw = true,
+                data = {
+                    id = id,
+                    rarity = tostring(rarity or ""),
+                    variety = tostring(variety or "")
+                }
+            }
+        }
+        local inst = game:GetService("ReplicatedStorage"):WaitForChild("Modules"):WaitForChild("Internals"):WaitForChild("Skeleton"):WaitForChild("Conduit"):WaitForChild("Instances")
+        local pur = inst:FindFirstChild("_purchaseEgg")
+        if pur and pur.FireServer then
+            pur:FireServer(unpack(args))
+        else
+            error("_purchaseEgg remote not found")
+        end
+    end)
+    return ok, err
+end
+
+-- Utility: wait for egg removal (confirmation of purchase) up to timeout seconds
+local function waitForEggRemoval(timeout)
+    local start = tick()
+    while tick() - start < (timeout or purchaseTimeout) do
+        local eggtag, _ = findEggTag()
+        if not eggtag then
+            return true
+        end
+        wait(0.15)
+    end
+    return false
+end
+
+-- Auto Buy+Spin toggle logic
 _G.AutoBuySpinEggs = _G.AutoBuySpinEggs or false
 
 local AutoBuySpinToggle = MainTab:CreateToggle({
@@ -247,49 +314,65 @@ local AutoBuySpinToggle = MainTab:CreateToggle({
             spawn(function()
                 while _G.AutoBuySpinEggs do
                     pcall(function()
-                        -- Ensure we have the latest egg info
+                        -- Refresh egg info
                         refreshCurrentEgg()
 
+                        -- Read current stats
+                        local parentName = currentParentName
+                        local container = currentEggTag and (currentEggTag:FindFirstChild("Container") or currentEggTag) or nil
+                        local price = container and readContainerField(container, "Price") or nil
+                        local rarity = container and readContainerField(container, "Rarity") or nil
+                        local variety = container and readContainerField(container, "Variety") or nil
+
+                        -- Build id from parentName
+                        local entityId = buildEntityIdFromParent(parentName)
+
+                        -- If there is an egg present and it matches desired criteria, attempt purchase
+                        -- Example rule: if price is numeric and <= threshold OR rarity matches desired; customize as needed
+                        local numericPrice = tonumber(tostring(price)) or nil
+                        local buyThreshold = 100 -- adjust as needed
+
+                        -- If an egg exists and we haven't purchased it yet, attempt purchase
                         if currentEggTag then
-                            local container = currentEggTag:FindFirstChild("Container") or currentEggTag
-                            local price = readContainerField(container, "Price")
-                            local rarity = readContainerField(container, "Rarity")
-                            local variety = readContainerField(container, "Variety")
-                            local parentName = currentParentName or (currentEggTag.Parent and currentEggTag.Parent.Name) or "Unknown"
-
-                            -- Example decision logic:
-                            -- Convert price to number if possible
-                            local numericPrice = tonumber(tostring(price)) or nil
-
-                            -- Replace the following placeholders with the actual remotes/functions used by the game.
-                            -- Example pattern (replace with real remote names and arguments):
-                            -- local ReplicatedStorage = game:GetService("ReplicatedStorage")
-                            -- local Remotes = ReplicatedStorage:WaitForChild("Remotes")
-                            -- Remotes.BuyEgg:FireServer(parentName, variety) -- or Remotes.BuyEgg:FireServer(variety)
-                            -- Remotes.SpinEgg:FireServer(parentName) -- or Remotes.SpinEgg:FireServer()
-
-                            -- Safety: simple example rule to avoid blind buying:
-                            -- Buy only if price is numeric and <= 100 (adjust threshold as needed)
-                            if numericPrice and numericPrice <= 100 then
-                                -- Example placeholder calls (commented out). Replace and uncomment when you know the game's remotes.
-                                -- pcall(function()
-                                --     Remotes.BuyEgg:FireServer(variety)
-                                --     wait(0.2)
-                                --     Remotes.SpinEgg:FireServer()
-                                -- end)
-
-                                -- For testing without remotes, print values to console
-                                print("[AutoBuySpin] Buying egg from:", parentName, "Price:", numericPrice, "Rarity:", tostring(rarity), "Variety:", tostring(variety))
+                            -- Fire purchase remote directly using detected stats
+                            if entityId and rarity and variety then
+                                -- Attempt purchase
+                                local ok, err = firePurchaseEgg(entityId, rarity, variety)
+                                if ok then
+                                    -- After firing purchase, wait for confirmation (egg removal)
+                                    local confirmed = waitForEggRemoval(purchaseTimeout)
+                                    if confirmed then
+                                        lastPurchaseConfirmed = true
+                                        print("[AutoBuySpin] Purchase confirmed for:", entityId, rarity, variety)
+                                    else
+                                        lastPurchaseConfirmed = false
+                                        print("[AutoBuySpin] Purchase not confirmed within timeout for:", entityId, rarity, variety)
+                                    end
+                                else
+                                    print("[AutoBuySpin] Purchase remote error:", err)
+                                end
                             else
-                                -- If price is not numeric or above threshold, just log for debugging
-                                print("[AutoBuySpin] Skipping buy. Parent:", parentName, "Price:", tostring(price), "Rarity:", tostring(rarity), "Variety:", tostring(variety))
+                                print("[AutoBuySpin] Missing entityId/rarity/variety; skipping purchase. Parent:", tostring(parentName), "Rarity:", tostring(rarity), "Variety:", tostring(variety))
                             end
                         else
-                            -- No egg found
-                            -- print("[AutoBuySpin] No egg detected.")
+                            -- No egg present. Only request a new egg if last purchase was confirmed.
+                            if lastPurchaseConfirmed then
+                                local ok, err = fireRequestEgg()
+                                if ok then
+                                    -- After requesting, set lastPurchaseConfirmed to false until we confirm a purchase
+                                    lastPurchaseConfirmed = false
+                                    -- Wait a short moment for the egg to spawn before next loop
+                                    wait(0.5)
+                                else
+                                    print("[AutoBuySpin] RequestEgg error:", err)
+                                end
+                            else
+                                -- Waiting for previous purchase confirmation; skip requesting new egg
+                                print("[AutoBuySpin] Waiting for previous purchase confirmation before requesting new egg.")
+                            end
                         end
                     end)
-                    wait(1) -- adjust delay to match game rate limits and desired frequency
+                    wait(1) -- adjust delay to avoid rate limits
                 end
             end)
         end
