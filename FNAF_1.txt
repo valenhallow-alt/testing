@@ -8,7 +8,7 @@ if _G.RayfieldInstance then
     _G.RayfieldInstance = nil
 end
 
--- Load Rayfield library and create a minimal, blank window
+-- Load Rayfield library and create a window
 local Rayfield = loadstring(game:HttpGet('https://raw.githubusercontent.com/UnHub-LEGO/Scripts/refs/heads/main/Rayfield%20Library'))()
 _G.RayfieldInstance = Rayfield
 
@@ -39,61 +39,6 @@ local Window = Rayfield:CreateWindow({
         Key = {}
     }
 })
-
--- =========================
--- New "Main" tab + toggle
--- =========================
-
--- Create a Main tab and a section for controls
-local MainTab = Window:CreateTab("Main", 4483362458) -- Title, Image (use any valid image id or 0)
-local MainSection = MainTab:CreateSection("Main Controls")
-
--- Placeholder global flag (ensures a defined value on load)
-_G.AutoBuySpinEggs = _G.AutoBuySpinEggs or false
-
--- Create the Auto Buy+Spin Eggs toggle
-local AutoBuySpinToggle = MainTab:CreateToggle({
-    Name = "Auto Buy+Spin Eggs",
-    CurrentValue = _G.AutoBuySpinEggs,
-    Flag = "AutoBuySpinEggs",
-    Callback = function(Value)
-        _G.AutoBuySpinEggs = Value
-
-        if Value then
-            -- Start a background loop to perform the actions while enabled
-            spawn(function()
-                while _G.AutoBuySpinEggs do
-                    pcall(function()
-                        -- ======= IMPORTANT =======
-                        -- Replace the placeholder calls below with the actual remote events/functions
-                        -- used by the specific game you're targeting. The names used here are examples
-                        -- and will not work unless they match the game's API.
-                        --
-                        -- Example placeholders:
-                        -- local ReplicatedStorage = game:GetService("ReplicatedStorage")
-                        -- local Remotes = ReplicatedStorage:WaitForChild("Remotes")
-                        -- Remotes.BuyEgg:FireServer("EggName") -- buy an egg (replace "EggName")
-                        -- Remotes.SpinEgg:FireServer() -- spin/claim the egg
-                        --
-                        -- If the game uses different remotes or functions, update these lines accordingly.
-                        --
-                        -- Keep the pcall to avoid runtime errors if the remote names are incorrect.
-                        -- ==========================
-                        
-                        -- Placeholder: no-op (user must replace)
-                        -- Example:
-                        -- game:GetService("ReplicatedStorage").Remotes.BuyEgg:FireServer("BasicEgg")
-                        -- game:GetService("ReplicatedStorage").Remotes.SpinEgg:FireServer()
-                    end)
-                    wait(1) -- adjust delay as needed to match desired frequency and avoid rate limits
-                end
-            end)
-        end
-    end,
-})
-
--- Optionally expose the toggle object for later updates
-_G.AutoBuySpinToggle = AutoBuySpinToggle
 
 -- Minimal UI toggle button (draggable) to show/hide Rayfield
 do
@@ -139,3 +84,229 @@ end
 
 -- Load (or create) configuration so Rayfield can restore UI state if needed
 pcall(function() Rayfield:LoadConfiguration() end)
+
+-- =========================
+-- Main tab + egg-info UI
+-- =========================
+
+local MainTab = Window:CreateTab("Main", 4483362458) -- Title, Image
+local MainSection = MainTab:CreateSection("Main Controls")
+
+-- Labels to display egg info
+local ParentLabel = MainTab:CreateLabel("Parent: N/A", 4483362458, Color3.fromRGB(255,255,255), false)
+local PriceLabel = MainTab:CreateLabel("Price: N/A", 4483362458, Color3.fromRGB(255,255,255), false)
+local RarityLabel = MainTab:CreateLabel("Rarity: N/A", 4483362458, Color3.fromRGB(255,255,255), false)
+local VarietyLabel = MainTab:CreateLabel("Variety: N/A", 4483362458, Color3.fromRGB(255,255,255), false)
+
+-- Helper: safely read a property from a container (handles Value objects, TextLabels, StringValues, etc.)
+local function readContainerField(container, fieldName)
+    if not container then return nil end
+    local ok, result = pcall(function()
+        local obj = container:FindFirstChild(fieldName)
+        if not obj then return nil end
+        if obj:IsA("StringValue") or obj:IsA("IntValue") or obj:IsA("NumberValue") or obj:IsA("BoolValue") then
+            return obj.Value
+        end
+        if obj:IsA("TextLabel") or obj:IsA("TextBox") then
+            return obj.Text
+        end
+        if obj.Value ~= nil then
+            return obj.Value
+        end
+        if obj.Text ~= nil then
+            return obj.Text
+        end
+        return tostring(obj)
+    end)
+    if ok then return result end
+    return nil
+end
+
+-- Find the current Eggtag and its parent name
+local function findEggTag()
+    -- First check direct children of workspace
+    for _, child in ipairs(workspace:GetChildren()) do
+        local eggtag = child:FindFirstChild("Eggtag")
+        if eggtag then
+            return eggtag, child.Name
+        end
+    end
+    -- Fallback: search descendants
+    for _, desc in ipairs(workspace:GetDescendants()) do
+        if desc.Name == "Eggtag" then
+            local parent = desc.Parent
+            return desc, parent and parent.Name or nil
+        end
+    end
+    return nil, nil
+end
+
+-- Update UI labels from a given eggtag instance
+local function updateEggInfo(eggtag, parentName)
+    if not eggtag then
+        ParentLabel:Set("Parent: N/A")
+        PriceLabel:Set("Price: N/A")
+        RarityLabel:Set("Rarity: N/A")
+        VarietyLabel:Set("Variety: N/A")
+        return
+    end
+
+    local container = eggtag:FindFirstChild("Container") or eggtag
+    local price = readContainerField(container, "Price") or "N/A"
+    local rarity = readContainerField(container, "Rarity") or "N/A"
+    local variety = readContainerField(container, "Variety") or "N/A"
+
+    ParentLabel:Set("Parent: " .. (tostring(parentName) or "N/A"))
+    PriceLabel:Set("Price: " .. tostring(price))
+    RarityLabel:Set("Rarity: " .. tostring(rarity))
+    VarietyLabel:Set("Variety: " .. tostring(variety))
+end
+
+-- Track current eggtag and parent
+local currentEggTag = nil
+local currentParentName = nil
+
+local function refreshCurrentEgg()
+    local eggtag, parentName = findEggTag()
+    if eggtag ~= currentEggTag or parentName ~= currentParentName then
+        currentEggTag = eggtag
+        currentParentName = parentName
+        updateEggInfo(currentEggTag, currentParentName)
+    else
+        -- still update fields in case values changed
+        updateEggInfo(currentEggTag, currentParentName)
+    end
+end
+
+-- Listen for workspace changes to update egg info quickly
+workspace.DescendantAdded:Connect(function(desc)
+    if desc.Name == "Eggtag" then
+        wait(0.05)
+        pcall(refreshCurrentEgg)
+    end
+end)
+workspace.DescendantRemoving:Connect(function(desc)
+    if desc.Name == "Eggtag" then
+        wait(0.05)
+        pcall(refreshCurrentEgg)
+    end
+end)
+
+-- Also listen for changes inside the current egg's Container to update labels faster
+local function bindContainerListeners(eggtag)
+    if not eggtag then return end
+    local container = eggtag:FindFirstChild("Container") or eggtag
+    -- Disconnect previous listeners by recreating connections table per container
+    if container._rayfield_listeners then
+        for _, conn in ipairs(container._rayfield_listeners) do
+            pcall(function() conn:Disconnect() end)
+        end
+    end
+    container._rayfield_listeners = {}
+
+    -- Watch for child added/removed/changed inside container
+    local added = container.ChildAdded:Connect(function() pcall(refreshCurrentEgg) end)
+    local removed = container.ChildRemoved:Connect(function() pcall(refreshCurrentEgg) end)
+    table.insert(container._rayfield_listeners, added)
+    table.insert(container._rayfield_listeners, removed)
+
+    -- If there are Value/Text objects, watch their Changed events
+    for _, obj in ipairs(container:GetChildren()) do
+        if obj:IsA("StringValue") or obj:IsA("NumberValue") or obj:IsA("IntValue") or obj:IsA("BoolValue") or obj:IsA("TextLabel") or obj:IsA("TextBox") then
+            local conn = obj.Changed:Connect(function() pcall(refreshCurrentEgg) end)
+            table.insert(container._rayfield_listeners, conn)
+        end
+    end
+end
+
+-- Periodic poll as a fallback (keeps UI in sync)
+spawn(function()
+    while true do
+        pcall(function()
+            refreshCurrentEgg()
+            bindContainerListeners(currentEggTag)
+        end)
+        wait(1)
+    end
+end)
+
+-- =========================
+-- Auto Buy+Spin Eggs toggle
+-- =========================
+
+_G.AutoBuySpinEggs = _G.AutoBuySpinEggs or false
+
+local AutoBuySpinToggle = MainTab:CreateToggle({
+    Name = "Auto Buy+Spin Eggs",
+    CurrentValue = _G.AutoBuySpinEggs,
+    Flag = "AutoBuySpinEggs",
+    Callback = function(Value)
+        _G.AutoBuySpinEggs = Value
+
+        if Value then
+            spawn(function()
+                while _G.AutoBuySpinEggs do
+                    pcall(function()
+                        -- Ensure we have the latest egg info
+                        refreshCurrentEgg()
+
+                        if currentEggTag then
+                            local container = currentEggTag:FindFirstChild("Container") or currentEggTag
+                            local price = readContainerField(container, "Price")
+                            local rarity = readContainerField(container, "Rarity")
+                            local variety = readContainerField(container, "Variety")
+                            local parentName = currentParentName or (currentEggTag.Parent and currentEggTag.Parent.Name) or "Unknown"
+
+                            -- Example decision logic:
+                            -- Convert price to number if possible
+                            local numericPrice = tonumber(tostring(price)) or nil
+
+                            -- Replace the following placeholders with the actual remotes/functions used by the game.
+                            -- Example pattern (replace with real remote names and arguments):
+                            -- local ReplicatedStorage = game:GetService("ReplicatedStorage")
+                            -- local Remotes = ReplicatedStorage:WaitForChild("Remotes")
+                            -- Remotes.BuyEgg:FireServer(parentName, variety) -- or Remotes.BuyEgg:FireServer(variety)
+                            -- Remotes.SpinEgg:FireServer(parentName) -- or Remotes.SpinEgg:FireServer()
+
+                            -- Safety: simple example rule to avoid blind buying:
+                            -- Buy only if price is numeric and <= 100 (adjust threshold as needed)
+                            if numericPrice and numericPrice <= 100 then
+                                -- Example placeholder calls (commented out). Replace and uncomment when you know the game's remotes.
+                                -- pcall(function()
+                                --     Remotes.BuyEgg:FireServer(variety)
+                                --     wait(0.2)
+                                --     Remotes.SpinEgg:FireServer()
+                                -- end)
+
+                                -- For testing without remotes, print values to console
+                                print("[AutoBuySpin] Buying egg from:", parentName, "Price:", numericPrice, "Rarity:", tostring(rarity), "Variety:", tostring(variety))
+                            else
+                                -- If price is not numeric or above threshold, just log for debugging
+                                print("[AutoBuySpin] Skipping buy. Parent:", parentName, "Price:", tostring(price), "Rarity:", tostring(rarity), "Variety:", tostring(variety))
+                            end
+                        else
+                            -- No egg found
+                            -- print("[AutoBuySpin] No egg detected.")
+                        end
+                    end)
+                    wait(1) -- adjust delay to match game rate limits and desired frequency
+                end
+            end)
+        end
+    end,
+})
+
+-- Expose for external use if needed
+_G.AutoBuySpinToggle = AutoBuySpinToggle
+_G.GetCurrentEggInfo = function()
+    return {
+        EggTag = currentEggTag,
+        ParentName = currentParentName,
+        Price = currentEggTag and readContainerField(currentEggTag:FindFirstChild("Container") or currentEggTag, "Price") or nil,
+        Rarity = currentEggTag and readContainerField(currentEggTag:FindFirstChild("Container") or currentEggTag, "Rarity") or nil,
+        Variety = currentEggTag and readContainerField(currentEggTag:FindFirstChild("Container") or currentEggTag, "Variety") or nil,
+    }
+end
+
+-- Initial refresh
+pcall(refreshCurrentEgg)
