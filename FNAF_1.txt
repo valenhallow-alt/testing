@@ -47,8 +47,6 @@ do
     local Corner = Instance.new("UICorner")
 
     ST.Name = "Toggle UnHub"
-    -- Parent to the same UI context Rayfield uses so it appears alongside the Rayfield UI
-    -- If Rayfield:GetParent() or its parent is nil, fall back to CoreGui
     local parentGui = nil
     pcall(function()
         parentGui = Rayfield:GetParent() and Rayfield:GetParent().Parent
@@ -64,7 +62,7 @@ do
     T.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
     T.Position = UDim2.new(0, 30, 0.08, 0)
     T.Size = UDim2.new(0, 50, 0, 50)
-    T.Image = "rbxassetid://112045743772867" -- replace with your decal id if desired
+    T.Image = "rbxassetid://112045743772867"
     T.Active = true
     T.Draggable = true
     T.AutoButtonColor = true
@@ -73,7 +71,6 @@ do
     Corner.Parent = T
     Corner.CornerRadius = UDim.new(0, 8)
 
-    -- Toggle Rayfield visibility on click
     T.MouseButton1Click:Connect(function()
         local ok, enabled = pcall(function() return Rayfield:GetEnable() end)
         if ok then
@@ -85,13 +82,11 @@ end
 -- === Egg Info UI (Rayfield) ===
 local EggTab = Window:CreateTab("Egg Info", 4483362458)
 
--- Paragraph to show egg info
 local EggParagraph = EggTab:CreateParagraph({
     Title = "Spawned Egg",
     Content = "Price: -\nVariety: -\nRarity: -\nMutation: -"
 })
 
--- Optional debug toggle in UI (helps troubleshooting)
 local DebugToggle = EggTab:CreateToggle({
     Name = "Debug prints",
     CurrentValue = false,
@@ -99,7 +94,6 @@ local DebugToggle = EggTab:CreateToggle({
     Callback = function(val) end,
 })
 
--- Helper: safe print when debug enabled
 local function dbg(...)
     if DebugToggle and DebugToggle.CurrentValue then
         local t = {}
@@ -110,7 +104,6 @@ local function dbg(...)
     end
 end
 
--- Utility: format and update the paragraph
 local function updateParagraph(price, variety, rarity, mutation)
     price = price or "Unknown"
     variety = variety or "Unknown"
@@ -120,16 +113,53 @@ local function updateParagraph(price, variety, rarity, mutation)
     pcall(function() EggParagraph:Set({Title = "Spawned Egg", Content = content}) end)
 end
 
--- Robust extractor: checks attributes, child values, and common naming
+-- Helper: read value objects safely
+local function readValueObject(v)
+    if not v then return nil end
+    if v:IsA("StringValue") or v:IsA("IntValue") or v:IsA("NumberValue") or v:IsA("BoolValue") then
+        return v.Value
+    end
+    return nil
+end
+
+-- Determine if a model actually looks like an egg (has metadata)
+local function isEggModel(model)
+    if not model or not model:IsA("Model") then return false end
+
+    -- ignore containers that indicate hatched pets
+    local parentName = model.Parent and tostring(model.Parent.Name):lower() or ""
+    if parentName:find("produced") or parentName:find("pets") or parentName:find("hatched") then
+        return false
+    end
+
+    -- attributes that commonly indicate egg metadata
+    local attrNames = {"entity_id","EntityId","id","price","base_price","rarity","mutation","mutated","display_name","displayName"}
+    for _, n in ipairs(attrNames) do
+        local a = model:GetAttribute(n)
+        if a ~= nil then return true end
+    end
+
+    -- child value objects
+    local childNames = {"Price","price","BasePrice","base_price","Rarity","rarity","Mutation","mutation","Mutated","UUID","Uuid","uuid"}
+    for _, n in ipairs(childNames) do
+        local c = model:FindFirstChild(n)
+        if c and (c:IsA("StringValue") or c:IsA("IntValue") or c:IsA("NumberValue") or c:IsA("BoolValue")) then
+            return true
+        end
+    end
+
+    -- name contains egg or model has a UUID child
+    if tostring(model.Name):lower():find("egg") then return true end
+    if model:FindFirstChild("UUID") or model:FindFirstChild("Uuid") or model:FindFirstChild("uuid") then return true end
+
+    return false
+end
+
+-- Extract info from a model that is confirmed to be an egg
 local function extractEggInfoFromModel(model)
     if not model or not model:IsA("Model") then return nil end
 
-    -- quick heuristics: model name contains "egg" or model has children that look like egg metadata
-    local nameLower = tostring(model.Name):lower()
-    local looksLikeEgg = nameLower:find("egg") ~= nil
-
-    -- collect attributes (case-insensitive)
-    local function getAttr(m, names)
+    local function getAttrAny(m, names)
         for _, n in ipairs(names) do
             local v = m:GetAttribute(n)
             if v ~= nil then return v end
@@ -137,30 +167,27 @@ local function extractEggInfoFromModel(model)
         return nil
     end
 
-    local price = getAttr(model, {"price", "base_price", "BasePrice", "Price"})
-    local rarity = getAttr(model, {"rarity", "Rarity"})
-    local mutation = getAttr(model, {"mutation", "mutated", "is_mutated", "Mutation"})
-    local variety = getAttr(model, {"variety", "variant", "display_name", "displayName", "name"})
+    local price = getAttrAny(model, {"price","base_price","BasePrice","Price"})
+    local rarity = getAttrAny(model, {"rarity","Rarity"})
+    local mutation = getAttrAny(model, {"mutation","mutated","is_mutated","Mutated","Mutation"})
+    local variety = getAttrAny(model, {"display_name","displayName","variety","variant","name"})
 
-    -- search children for common value objects (StringValue, IntValue, NumberValue, BoolValue)
-    local function findChildValue(m, names)
+    local function getChildAny(m, names)
         for _, n in ipairs(names) do
             local c = m:FindFirstChild(n)
             if c then
-                if c:IsA("StringValue") or c:IsA("IntValue") or c:IsA("NumberValue") or c:IsA("BoolValue") then
-                    return c.Value
-                end
+                local val = readValueObject(c)
+                if val ~= nil then return val end
             end
         end
         return nil
     end
 
-    price = price or findChildValue(model, {"Price", "price", "BasePrice", "base_price"})
-    rarity = rarity or findChildValue(model, {"Rarity", "rarity"})
-    mutation = mutation or findChildValue(model, {"Mutation", "mutation", "Mutated", "mutated"})
-    variety = variety or findChildValue(model, {"Variety", "variety", "Variant", "variant", "DisplayName", "display_name"})
+    price = price or getChildAny(model, {"Price","price","BasePrice","base_price"})
+    rarity = rarity or getChildAny(model, {"Rarity","rarity"})
+    mutation = mutation or getChildAny(model, {"Mutation","mutation","Mutated","mutated"})
+    variety = variety or getChildAny(model, {"Variety","variety","Variant","variant","DisplayName","display_name"})
 
-    -- If still missing, check descendants for any child whose name suggests metadata
     if not (price and rarity and variety) then
         for _, desc in ipairs(model:GetDescendants()) do
             if desc:IsA("StringValue") or desc:IsA("IntValue") or desc:IsA("NumberValue") or desc:IsA("BoolValue") then
@@ -173,73 +200,85 @@ local function extractEggInfoFromModel(model)
         end
     end
 
-    -- If nothing found but model name contains egg, use model.Name as variety
-    if not variety and looksLikeEgg then
-        variety = model.Name
-    end
+    if not variety then variety = model.Name end
 
-    -- Normalize mutation boolean to readable string
     if type(mutation) == "boolean" then
         mutation = mutation and "Yes" or "No"
+    elseif type(mutation) == "number" then
+        mutation = (mutation ~= 0) and "Yes" or "No"
     end
 
-    -- If we have at least one meaningful field, consider this an egg
-    if price or rarity or variety or mutation or looksLikeEgg then
-        return {
-            price = price,
-            variety = variety,
-            rarity = rarity,
-            mutation = mutation,
-            model = model
-        }
-    end
-
-    return nil
+    return {
+        price = price,
+        variety = variety,
+        rarity = rarity,
+        mutation = mutation,
+        model = model
+    }
 end
 
--- Stronger detection: check a candidate instance (Model or descendant) and return info if it's an egg
-local function inspectCandidate(inst)
+-- Given any instance (descendant or model), find the most specific model that is an egg
+local function findEggModelFromInstance(inst)
     if not inst then return nil end
 
-    -- If inst is a Model, try it directly
-    if inst:IsA("Model") then
-        local info = extractEggInfoFromModel(inst)
-        if info then
-            dbg("Found egg model:", inst:GetFullName())
-            return info
-        end
+    if inst:IsA("Model") and isEggModel(inst) then
+        return inst
     end
 
-    -- If inst is a descendant (e.g., a StringValue or part), check its parent model chain
     local parent = inst.Parent
     while parent and parent ~= workspace do
-        if parent:IsA("Model") then
-            local info = extractEggInfoFromModel(parent)
-            if info then
-                dbg("Found egg via descendant:", inst:GetFullName(), "->", parent:GetFullName())
-                return info
-            end
+        local pname = tostring(parent.Name):lower()
+        if pname:find("produced") or pname:find("pets") or pname:find("hatched") then
+            return nil
         end
+
+        if parent:IsA("Model") and isEggModel(parent) then
+            return parent
+        end
+
+        if pname:find("platform") or pname:find("plot") or pname:find("plots") then
+            local up = parent.Parent
+            if up and up:IsA("Model") and isEggModel(up) then
+                return up
+            end
+            return nil
+        end
+
         parent = parent.Parent
     end
 
     return nil
 end
 
--- Keep track of the last displayed egg to avoid redundant updates
-local lastDisplayed = {
-    model = nil,
-    price = nil,
-    variety = nil,
-    rarity = nil,
-    mutation = nil
-}
+-- Inspect a candidate instance and return egg info if found
+local function inspectCandidate(inst)
+    if not inst then return nil end
 
--- Update UI if info changed
+    local eggModel = nil
+    if inst:IsA("Model") then
+        if isEggModel(inst) then eggModel = inst end
+    else
+        eggModel = findEggModelFromInstance(inst)
+    end
+
+    if eggModel then
+        local info = extractEggInfoFromModel(eggModel)
+        if info then
+            dbg("Found egg model:", eggModel:GetFullName(), "->", "price:", tostring(info.price), "variety:", tostring(info.variety), "rarity:", tostring(info.rarity), "mutation:", tostring(info.mutation))
+            return info
+        end
+    end
+
+    return nil
+end
+
+-- Track last displayed to avoid redundant updates
+local lastDisplayed = { model = nil, price = nil, variety = nil, rarity = nil, mutation = nil }
+
 local function maybeUpdateUI(info)
     if not info then
         updateParagraph(nil, nil, nil, nil)
-        lastDisplayed = {model = nil}
+        lastDisplayed = { model = nil }
         return
     end
 
@@ -261,9 +300,8 @@ local function maybeUpdateUI(info)
     end
 end
 
--- Search workspace for likely eggs (initial scan and fallback)
+-- Scan workspace for eggs (initial scan)
 local function scanWorkspaceForEgg()
-    -- Common roots where eggs might appear
     local roots = {
         workspace:FindFirstChild("Entities"),
         workspace:FindFirstChild("SpawnedEggs"),
@@ -276,50 +314,48 @@ local function scanWorkspaceForEgg()
         if root and root:IsA("Instance") then
             for _, child in ipairs(root:GetDescendants()) do
                 local info = inspectCandidate(child)
-                if info then
-                    return info
-                end
+                if info then return info end
             end
         end
     end
     return nil
 end
 
--- Main refresh routine: tries to find the most relevant egg and update UI
+-- Main refresh
 local function refreshEggInfo()
     local ok, info = pcall(scanWorkspaceForEgg)
     if ok and info then
         maybeUpdateUI(info)
         return
     end
-    -- nothing found
     maybeUpdateUI(nil)
 end
 
--- Event-driven updates: when new descendants are added, inspect them
+-- Event-driven updates: inspect new descendants but avoid Produced/pets
 workspace.DescendantAdded:Connect(function(desc)
-    -- quick filter to reduce noise
     local nameLower = tostring(desc.Name):lower()
+    if nameLower:find("produced") or nameLower:find("pets") or nameLower:find("hatched") then
+        return
+    end
+
     if desc:IsA("Model") or nameLower:find("egg") or nameLower:find("price") or nameLower:find("rarity") or nameLower:find("mutation") or nameLower:find("uuid") or nameLower:find("entity") then
-        wait(0.05) -- small delay to allow attributes/children to be set
+        wait(0.06)
         local ok, info = pcall(inspectCandidate, desc)
-        if ok and info then
-            maybeUpdateUI(info)
-        end
+        if ok and info then maybeUpdateUI(info) end
     end
 end)
 
--- If a model's attributes change, re-inspect that model
+-- Watch attributes/children on models that look like eggs
 local function connectAttributeWatcher(model)
     if not model or not model:IsA("Model") then return end
-    -- Avoid connecting multiple times
     if model:GetAttribute("__eggInfoWatcher") then return end
     model:SetAttribute("__eggInfoWatcher", true)
 
-    -- AttributeChanged is available on Instances
     if model.AttributeChangedSignal then
         model.AttributeChangedSignal:Connect(function(attr)
-            if attr and (attr:lower():find("price") or attr:lower():find("rar") or attr:lower():find("mutat") or attr:lower():find("var")) then
+            if not attr then return end
+            local al = attr:lower()
+            if al:find("price") or al:find("rar") or al:find("mutat") or al:find("var") or al:find("display") then
                 wait(0.02)
                 local ok, info = pcall(extractEggInfoFromModel, model)
                 if ok and info then maybeUpdateUI(info) end
@@ -327,7 +363,6 @@ local function connectAttributeWatcher(model)
         end)
     end
 
-    -- Also watch children added to the model (value objects)
     model.ChildAdded:Connect(function(child)
         if child:IsA("StringValue") or child:IsA("IntValue") or child:IsA("NumberValue") or child:IsA("BoolValue") then
             wait(0.02)
@@ -337,24 +372,22 @@ local function connectAttributeWatcher(model)
     end)
 end
 
--- Connect watchers for existing models in workspace (so attribute changes are caught)
+-- Connect watchers for existing models
 local function connectExistingModels()
     for _, m in ipairs(workspace:GetDescendants()) do
-        if m:IsA("Model") then
+        if m:IsA("Model") and isEggModel(m) then
             connectAttributeWatcher(m)
         end
     end
 end
 
--- Also connect to new models to watch their attributes
 workspace.DescendantAdded:Connect(function(desc)
     if desc:IsA("Model") then
         connectAttributeWatcher(desc)
     else
-        -- if a child of a model is added, ensure its parent model is watched
         local parent = desc.Parent
         while parent and parent ~= workspace do
-            if parent:IsA("Model") then
+            if parent:IsA("Model") and isEggModel(parent) then
                 connectAttributeWatcher(parent)
                 break
             end
@@ -367,7 +400,7 @@ end)
 connectExistingModels()
 refreshEggInfo()
 
--- Periodic polling fallback (in case events miss something)
+-- Polling fallback
 spawn(function()
     while true do
         pcall(refreshEggInfo)
@@ -377,7 +410,7 @@ end)
 
 -- === End Egg Info UI ===
 
--- Load (or create) configuration so Rayfield can restore UI state if needed
+-- Load configuration
 pcall(function() Rayfield:LoadConfiguration() end)
 
--- Debug note for user: if UI still doesn't show values, enable "Debug prints" toggle and check Output for [EggInfo DEBUG] messages.
+dbg("EggInfo initialized. Enable Debug prints to see detection logs.")
