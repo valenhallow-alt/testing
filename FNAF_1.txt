@@ -5,7 +5,7 @@
 -- 3) Conduit listeners + targeted workspace Eggtag detection
 -- 4) debug UI and manual scan
 -- 5) robust purchase attempts with detailed logging
--- 6) automatic scanning for newly spawned eggs (workspace watchers)
+-- 6) automatic scanning for newly spawned eggs (improved polling)
 -- 7) prefer using detected "source" for remote id when appropriate
 
 -- Destroy previous Rayfield instance if present
@@ -622,12 +622,45 @@ do
         end)
     end
 
-    -- === Automatic detection: watch workspace for newly spawned eggs ===
+    -- === Automatic detection: watch workspace for newly spawned eggs (improved) ===
     do
         local childChildConns = {}     -- childInstance -> connection
         local debounceTimestamps = {}  -- childName -> last detection tick
         local DEBOUNCE_SECONDS = 0.5
+        local POLL_INTERVAL = 0.08
+        local POLL_TIMEOUT = 1.5
 
+        -- Wait until the Eggtag.Container.Entity has readable text or attributes (returns true if ready)
+        local function waitForEntityReady(eggtag)
+            if not eggtag or not eggtag:IsA("BillboardGui") then return false end
+            local container = eggtag:FindFirstChild("Container") or eggtag:FindFirstChildWhichIsA("Frame") or eggtag:FindFirstChildWhichIsA("Folder")
+            if not container then return false end
+            local entity = container:FindFirstChild("Entity") or container:FindFirstChildWhichIsA("TextLabel") or container:FindFirstChildWhichIsA("Model")
+            if not entity then return false end
+
+            local start = tick()
+            while tick() - start <= POLL_TIMEOUT do
+                if entity:IsA("TextLabel") or entity:IsA("TextButton") or entity:IsA("TextBox") then
+                    local txt = tostring(entity.Text or "")
+                    if txt ~= "" and not txt:match("^%s*$") then
+                        return true
+                    end
+                end
+                for _, ch in ipairs(entity:GetChildren()) do
+                    if ch:IsA("ValueBase") then
+                        local v = tostring(ch.Value or "")
+                        if v ~= "" and not v:match("^%s*$") then return true end
+                    end
+                end
+                local ok, attrId = pcall(function() return entity:GetAttribute("id") end)
+                if ok and attrId and tostring(attrId) ~= "" then return true end
+
+                task.wait(POLL_INTERVAL)
+            end
+            return false
+        end
+
+        -- Try scanning a single top-level child (non-blocking). Only attempt purchase if toggle is enabled.
         local function tryScanChild(child)
             if not child or not child:IsA("Instance") then return end
             local name = tostring(child.Name or "")
@@ -637,10 +670,22 @@ do
 
             local eggtag = child:FindFirstChild("Eggtag")
             if eggtag and eggtag:IsA("BillboardGui") then
-                pcall(function()
-                    local ok, found = pcall(targetedWorkspaceScan)
-                    if ok and found then
-                        pcall(safeFirePurchase)
+                task.spawn(function()
+                    local okReady, ready = pcall(waitForEntityReady, eggtag)
+                    if okReady and ready then
+                        local ok, found = pcall(targetedWorkspaceScan)
+                        if ok and found then
+                            if _G.UnHub_AutoBuyEgg then
+                                pcall(safeFirePurchase)
+                            else
+                                setStatus("Egg detected (auto-scan) — Auto Buy is OFF")
+                            end
+                        end
+                    else
+                        pcall(function()
+                            local ok2, found2 = pcall(targetedWorkspaceScan)
+                            if ok2 and found2 and _G.UnHub_AutoBuyEgg then pcall(safeFirePurchase) end
+                        end)
                     end
                 end)
                 return
@@ -648,15 +693,30 @@ do
 
             for _, c2 in ipairs(child:GetChildren()) do
                 if c2:IsA("BillboardGui") or string.find(string.lower(c2.Name or ""), "egg") then
-                    pcall(function()
-                        local ok, found = pcall(targetedWorkspaceScan)
-                        if ok and found then pcall(safeFirePurchase) end
+                    task.spawn(function()
+                        local okReady, ready = pcall(waitForEntityReady, c2)
+                        if okReady and ready then
+                            local ok, found = pcall(targetedWorkspaceScan)
+                            if ok and found then
+                                if _G.UnHub_AutoBuyEgg then
+                                    pcall(safeFirePurchase)
+                                else
+                                    setStatus("Egg detected (auto-scan) — Auto Buy is OFF")
+                                end
+                            end
+                        else
+                            pcall(function()
+                                local ok2, found2 = pcall(targetedWorkspaceScan)
+                                if ok2 and found2 and _G.UnHub_AutoBuyEgg then pcall(safeFirePurchase) end
+                            end)
+                        end
                     end)
                     return
                 end
             end
         end
 
+        -- Attach a ChildAdded listener to a top-level child so we detect Eggtag added later
         local function attachChildChildListener(child)
             if not child or not child:IsA("Instance") then return end
             if childChildConns[child] then return end
@@ -668,15 +728,18 @@ do
             childChildConns[child] = conn
         end
 
+        -- Monitor existing top-level children
         for _, c in ipairs(workspace:GetChildren()) do
             attachChildChildListener(c)
         end
 
+        -- Watch for new top-level children being added to workspace
         local workspaceChildConn = workspace.ChildAdded:Connect(function(child)
             attachChildChildListener(child)
             task.defer(function() tryScanChild(child) end)
         end)
 
+        -- Fallback: watch for any BillboardGui created anywhere under workspace and map to top-level parent
         local workspaceDescConn = workspace.DescendantAdded:Connect(function(desc)
             if not desc or not desc:IsA("BillboardGui") then return end
             local top = desc
