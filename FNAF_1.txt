@@ -85,26 +85,14 @@ end
 -- Load (or create) configuration so Rayfield can restore UI state if needed
 pcall(function() Rayfield:LoadConfiguration() end)
 
--- Egg Status UI
+-- Egg Status UI (always enabled; toggle removed)
 do
     local StatusTab = Window:CreateTab("Egg Status", 4483362458)
     local StatusSection = StatusTab:CreateSection("Spawned Egg Status")
     local StatusParagraph = StatusTab:CreateParagraph({Title = "Egg Status", Content = "Searching for spawned egg..."})
 
-    local StatusToggle = StatusTab:CreateToggle({
-        Name = "Enable Status Updates",
-        CurrentValue = true,
-        Flag = "EggStatusToggle",
-        Callback = function(Value)
-            -- placeholder, will be set below
-        end,
-    })
-
+    -- Always enabled; user cannot disable
     local enabled = true
-    -- Ensure toggle's callback updates local enabled variable
-    StatusToggle.Callback = function(Value)
-        enabled = Value
-    end
 
     -- Helper to read a text-like child safely
     local function readTextOrValue(inst)
@@ -117,15 +105,11 @@ do
         if inst:IsA("ValueBase") and inst.Value ~= nil then
             return tostring(inst.Value)
         end
-        -- Try common properties
-        if pcall(function() return inst.Text end) then
-            local ok, txt = pcall(function() return inst.Text end)
-            if ok and type(txt) == "string" and txt ~= "" then return txt end
-        end
-        if pcall(function() return inst.Value end) then
-            local ok, val = pcall(function() return inst.Value end)
-            if ok and val ~= nil then return tostring(val) end
-        end
+        -- Try common properties safely
+        local ok, txt = pcall(function() return inst.Text end)
+        if ok and type(txt) == "string" and txt ~= "" then return txt end
+        local ok2, val = pcall(function() return inst.Value end)
+        if ok2 and val ~= nil then return tostring(val) end
         return nil
     end
 
@@ -161,7 +145,7 @@ do
         return table.concat(lines, "\n")
     end
 
-    -- Updater loop
+    -- Updater loop (always running)
     spawn(function()
         while true do
             if enabled then
