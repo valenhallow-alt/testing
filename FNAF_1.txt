@@ -161,10 +161,10 @@ local currentParentName = nil
 
 -- Timing and retry configuration (tweak these to control speed/behavior)
 local interRemoteDelay = 0.4        -- delay between request and purchase attempts (seconds)
-local spawnTimeout = 6              -- how long to wait for an egg to spawn after request (seconds)
-local purchaseTimeout = 6           -- how long to wait for egg removal after purchase attempt (seconds)
-local loopRetryInterval = 0.8       -- main loop retry interval (seconds)
-local requestRetryInterval = 0.8    -- how often to retry _requestEgg when continuously requesting (seconds)
+local spawnTimeout = 0.6              -- how long to wait for an egg to spawn after request (seconds)
+local purchaseTimeout = 0.5           -- how long to wait for egg removal after purchase attempt (seconds)
+local loopRetryInterval = 0.6       -- main loop retry interval (seconds)
+local requestRetryInterval = 0.6    -- how often to retry _requestEgg when continuously requesting (seconds)
 local maxRequestAttempts = nil      -- nil = unlimited; or set a number to cap repeated requests
 
 -- Forward declaration so refreshCurrentEgg can be referenced inside listeners
