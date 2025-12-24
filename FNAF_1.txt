@@ -1,9 +1,11 @@
 -- Safe, full UnHub Egg Buyer script (complete)
+-- Updated: prefer using detected "source" for remote id when appropriate
 -- 1) guarded Rayfield loader
 -- 2) safe UI bootstrap
 -- 3) Conduit listeners + targeted workspace Eggtag detection
 -- 4) debug UI and manual scan
 -- 5) robust purchase attempts with detailed logging
+-- 6) buildArgs now prefers LastEgg.source when constructing the remote id
 
 -- Destroy previous Rayfield instance if present
 if _G.RayfieldInstance then
@@ -203,15 +205,37 @@ do
                     print("[UnHub] _requestEgg payload raw: " .. tostring(payload))
                 end
                 -- best-effort capture if payload contains expected fields
-                if type(payload) == "table" and payload.data then
+                if type(payload) == "table" then
+                    -- prefer payload.data if present, otherwise try other keys
+                    local dataTable = nil
+                    if type(payload.data) == "table" then
+                        dataTable = payload.data
+                    else
+                        dataTable = payload
+                    end
+
+                    -- capture id/rarity/variety and also capture a "source" if available
+                    local capturedId = tostring(dataTable.id or dataTable.entity_id or dataTable.entity or dataTable.display_name or "")
+                    local capturedRarity = tostring(dataTable.rarity or "Basic")
+                    local capturedVariety = tostring(dataTable.variety or "Normal")
+                    local capturedSource = nil
+                    -- try to infer source: prefer explicit fields, otherwise use display_name or other keys
+                    if dataTable.source then
+                        capturedSource = tostring(dataTable.source)
+                    elseif dataTable.display_name then
+                        capturedSource = tostring(dataTable.display_name)
+                    elseif payload.display_name then
+                        capturedSource = tostring(payload.display_name)
+                    end
+
                     LastEgg = {
-                        id = tostring(payload.data.id or payload.id or payload.entity_id or payload.entity or ""),
-                        rarity = tostring(payload.data.rarity or payload.rarity or "Basic"),
-                        variety = tostring(payload.data.variety or payload.variety or "Normal"),
-                        source = "Conduit"
+                        id = capturedId,
+                        rarity = capturedRarity,
+                        variety = capturedVariety,
+                        source = capturedSource or LastEgg and LastEgg.source or "Unknown",
                     }
                     setStatus("Captured egg from Conduit (best-effort)")
-                    print(string.format("[UnHub] Captured: id=%s rarity=%s variety=%s", LastEgg.id, LastEgg.rarity, LastEgg.variety))
+                    print(string.format("[UnHub] Captured: id=%s rarity=%s variety=%s source=%s", LastEgg.id, LastEgg.rarity, LastEgg.variety, tostring(LastEgg.source)))
                 else
                     setStatus("_requestEgg missing expected data; see console dump")
                 end
@@ -228,15 +252,33 @@ do
                 else
                     print("[UnHub] _purchaseEgg payload raw: " .. tostring(payload))
                 end
-                if type(payload) == "table" and payload.data then
+                if type(payload) == "table" then
+                    local dataTable = nil
+                    if type(payload.data) == "table" then
+                        dataTable = payload.data
+                    else
+                        dataTable = payload
+                    end
+                    local capturedId = tostring(dataTable.id or dataTable.entity_id or dataTable.entity or dataTable.display_name or "")
+                    local capturedRarity = tostring(dataTable.rarity or "Basic")
+                    local capturedVariety = tostring(dataTable.variety or "Normal")
+                    local capturedSource = nil
+                    if dataTable.source then
+                        capturedSource = tostring(dataTable.source)
+                    elseif dataTable.display_name then
+                        capturedSource = tostring(dataTable.display_name)
+                    elseif payload.display_name then
+                        capturedSource = tostring(payload.display_name)
+                    end
+
                     LastEgg = {
-                        id = tostring(payload.data.id or payload.id or payload.entity_id or payload.entity or ""),
-                        rarity = tostring(payload.data.rarity or payload.rarity or "Basic"),
-                        variety = tostring(payload.data.variety or payload.variety or "Normal"),
-                        source = "Conduit"
+                        id = capturedId,
+                        rarity = capturedRarity,
+                        variety = capturedVariety,
+                        source = capturedSource or LastEgg and LastEgg.source or "Unknown",
                     }
                     setStatus("Captured egg from Conduit (purchase event)")
-                    print(string.format("[UnHub] Captured: id=%s rarity=%s variety=%s", LastEgg.id, LastEgg.rarity, LastEgg.variety))
+                    print(string.format("[UnHub] Captured: id=%s rarity=%s variety=%s source=%s", LastEgg.id, LastEgg.rarity, LastEgg.variety, tostring(LastEgg.source)))
                 else
                     setStatus("_purchaseEgg missing expected data; see console dump")
                 end
@@ -323,7 +365,8 @@ do
                             dumpInstance(entity, 0, 3)
                             local data = extractFromEntity(entity)
                             if data then
-                                data.source = "Workspace." .. child.Name
+                                -- store source as the parent's name (the dynamic egg name like "Okarun")
+                                data.source = tostring(child.Name)
                                 LastEgg = data
                                 setStatus(string.format("Found egg: id=%s rarity=%s variety=%s (source=%s)", data.id, data.rarity, data.variety, child.Name))
                                 return true
@@ -351,7 +394,7 @@ do
                                     dumpInstance(entity, 0, 3)
                                     local data = extractFromEntity(entity)
                                     if data then
-                                        data.source = "Workspace." .. child.Name
+                                        data.source = tostring(child.Name)
                                         LastEgg = data
                                         setStatus(string.format("Found egg: id=%s rarity=%s variety=%s (source=%s)", data.id, data.rarity, data.variety, child.Name))
                                         return true
@@ -378,15 +421,48 @@ do
     end
 
     -- Build args and safe fire
+    -- Updated: prefer LastEgg.source when constructing the id for the remote
     local function buildArgs(egg)
         if not egg then return nil end
+
+        -- Determine which token to use for the remote id:
+        -- Prefer egg.source (if present and non-empty), otherwise fall back to egg.id.
+        -- Normalize to a token like "Okarun" or "entity_Okarun_egg" as needed.
+        local function normalizeToken(token)
+            if not token then return nil end
+            token = tostring(token)
+            token = token:gsub("^%s*(.-)%s*$", "%1") -- trim
+            if token == "" then return nil end
+            -- If token already looks like "entity_<name>_egg", extract the <name>
+            local inner = token:match("^entity_([%w_%-]+)_egg$")
+            if inner then return inner end
+            -- If token contains spaces or extra text, try to extract a word-like token
+            local simple = token:match("([%w_%-]+)")
+            return simple or token
+        end
+
+        local preferred = nil
+        if egg.source and tostring(egg.source) ~= "" and tostring(egg.source):lower() ~= "unknown" then
+            preferred = normalizeToken(egg.source)
+        end
+        if not preferred then
+            preferred = normalizeToken(egg.id)
+        end
+        if not preferred then
+            -- fallback: try variety or rarity as last resort (unlikely)
+            preferred = normalizeToken(egg.variety) or normalizeToken(egg.rarity) or "unknown"
+        end
+
+        -- Construct final id in the exact shape the remote expects: "entity_<token>_egg"
+        local finalId = "entity_" .. tostring(preferred) .. "_egg"
+
         return {
             {
                 __raw = true,
                 data = {
-                    id = egg.id,
-                    rarity = egg.rarity,
-                    variety = egg.variety
+                    id = finalId,
+                    rarity = tostring(egg.rarity or "Basic"),
+                    variety = tostring(egg.variety or "Normal")
                 }
             }
         }
@@ -432,7 +508,7 @@ do
             return tostring(a)
         end
         local payloadStr = argsToString(args)
-        setStatus("Attempting purchase: " .. tostring(LastEgg.id))
+        setStatus("Attempting purchase: " .. tostring(LastEgg.source or LastEgg.id or "unknown"))
         print("[UnHub] Attempting purchase with payload:", payloadStr)
 
         -- Debounce
@@ -554,7 +630,8 @@ do
         setStatus("AutoBuy loop starting")
         spawn(function()
             while _G.UnHub_AutoBuyEgg do
-                if LastEgg and LastEgg.source == "Conduit" then
+                if LastEgg and LastEgg.source and LastEgg.source ~= "" and LastEgg.source ~= "Unknown" then
+                    -- prefer Conduit-captured or workspace-captured source
                     pcall(safeFirePurchase)
                     task.wait(1.5)
                 else
