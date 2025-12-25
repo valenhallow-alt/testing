@@ -135,6 +135,26 @@ do
         return out
     end
 
+    -- Speed control defaults (these will be driven by the slider)
+    local spawnInterval = 1.0          -- seconds between spawn requests (default 1s -> ~60/min)
+    local requestCooldown = 0.22       -- minimum seconds between requestEgg calls
+    local attemptDelay = 1.0           -- delay between replacement attempts
+    local pollInterval = 0.18          -- polling interval for status checks
+    local purchaseRetryDelay = 0.6     -- delay between purchase retries
+
+    -- Apply slider value to all timing variables (keeps relationships sensible)
+    local function applySpeed(s)
+        spawnInterval = tonumber(s) or 1.0
+        -- keep a minimum cooldown so we don't spam too fast
+        requestCooldown = math.max(0.12, spawnInterval * 0.22)
+        attemptDelay = math.max(0.12, spawnInterval)
+        pollInterval = math.max(0.08, spawnInterval * 0.18)
+        purchaseRetryDelay = math.max(0.4, spawnInterval * 0.6)
+    end
+
+    -- Initialize speeds
+    applySpeed(spawnInterval)
+
     -- Wait helper for StatusTab API readiness
     local function waitForStatusTab(tab, timeout)
         timeout = timeout or 6
@@ -148,10 +168,11 @@ do
         return false
     end
 
-    -- Create dropdowns only when API is ready (Rayfield expects MultipleOptions key)
+    -- Create dropdowns and slider only when API is ready
     if not waitForStatusTab(StatusTab, 6) then
         warn("StatusTab or CreateDropdown not available; dropdowns not created.")
     else
+        -- Rarities dropdown (multi-select)
         local RaritiesDropdown = StatusTab:CreateDropdown({
             Name = "Rarities",
             Options = RARITY_OPTIONS,
@@ -182,6 +203,7 @@ do
             end
         end)
 
+        -- Varieties dropdown (multi-select)
         local VarietiesDropdown = StatusTab:CreateDropdown({
             Name = "Varieties",
             Options = VARIETY_OPTIONS,
@@ -211,6 +233,19 @@ do
                 end
             end
         end)
+
+        -- Slider: controls the global speed (0.3s - 1s)
+        local SpeedSlider = StatusTab:CreateSlider({
+            Name = "Spawn Interval (seconds)",
+            Range = {0.3, 1.0},
+            Increment = 0.05,
+            Suffix = "s",
+            CurrentValue = spawnInterval,
+            Flag = "SpawnInterval",
+            Callback = function(value)
+                applySpeed(value)
+            end,
+        })
     end
 
     -- Utility: read text/value from GUI/value objects
@@ -340,7 +375,7 @@ do
             else
                 pcall(function() StatusParagraph:Set({Title = "Egg Status", Content = "No egg detected."}) end)
             end
-            task.wait(0.6)
+            task.wait(math.max(0.5, pollInterval))
         end
     end)
 
@@ -358,11 +393,10 @@ do
     -- Wait until no egg present (poll)
     local function waitUntilNoEgg(timeout)
         local start = tick()
-        local poll = 0.18
         while (tick() - start) < (timeout or 8) do
             local ok, eggs = pcall(function() return getAllSpawnedEggsInfo() end)
             if ok and (not eggs or #eggs == 0) then return true end
-            task.wait(poll)
+            task.wait(pollInterval)
         end
         return false
     end
@@ -394,15 +428,13 @@ do
         if not waitForDisappear then return true end
 
         local start = tick()
-        local timeout = 5
-        local poll = 0.18
-        while (tick() - start) < timeout do
+        while (tick() - start) < 5 do
             local ok, eggs = pcall(function() return getAllSpawnedEggsInfo() end)
             if ok then
                 if not eggs or #eggs == 0 then return true end
                 if tostring(eggs[1].Name or "") ~= tostring(eggInfo.Name or "") then return true end
             end
-            task.wait(poll)
+            task.wait(pollInterval)
         end
         return false
     end
@@ -418,46 +450,88 @@ do
         return selectedRarities[rl] == true and selectedVarieties[vl] == true
     end
 
-    -- Core loop: spawn ~60 eggs/min by requesting every 1s when appropriate.
+    -- State & timing controls
     local autoEnabled = false
     local autoThread = nil
+    local replacing = false
+    local lastRequestTime = 0
 
+    -- Aggressive replace but controlled by spawnInterval and attemptDelay
+    local function aggressiveReplaceUntilAllowed(currentEgg)
+        replacing = true
+        local startName = tostring(currentEgg.Name or "")
+        local SAFETY_MAX_ATTEMPTS = math.max(6, math.floor(30 * (1.0 / spawnInterval))) -- scale attempts with speed
+        for attempt = 1, SAFETY_MAX_ATTEMPTS do
+            if not autoEnabled then break end
+
+            if tick() - lastRequestTime >= requestCooldown then
+                if requestEggRemote then
+                    pcall(function()
+                        local args = {
+                            {
+                                __raw = true,
+                                data = {}
+                            }
+                        }
+                        requestEggRemote:FireServer(unpack(args))
+                    end)
+                end
+                lastRequestTime = tick()
+            end
+
+            task.wait(attemptDelay)
+
+            local ok, eggsAfter = pcall(function() return getAllSpawnedEggsInfo() end)
+            if ok and eggsAfter and #eggsAfter > 0 then
+                local newEgg = eggsAfter[1]
+                local newName = tostring(newEgg.Name or "")
+                if newName ~= startName then
+                    if isEggAllowed(newEgg) then
+                        replacing = false
+                        return newEgg
+                    else
+                        startName = newName
+                    end
+                end
+            else
+                task.wait(math.min(0.25, attemptDelay))
+            end
+        end
+        replacing = false
+        return nil
+    end
+
+    -- Core loop: spawn at roughly 1/spawnInterval requests per second (user-controlled)
     local function autoSpawnBuyLoop()
-        -- We will request an egg, wait 1s, request another, etc. If an allowed & affordable egg appears we buy it and then wait until it's gone.
         while autoEnabled do
-            -- Re-scan current eggs
             local ok, eggsNow = pcall(function() return getAllSpawnedEggsInfo() end)
             if not ok then eggsNow = {} end
             local current = (eggsNow and #eggsNow > 0) and eggsNow[1] or nil
 
             if current and isEggAllowed(current) then
-                -- Allowed egg present. Check affordability.
+                -- Allowed egg present: check affordability
                 local cash = getPlayerCash()
                 local cost = tonumber(current.PriceNum) or 0
 
                 if cost > 0 and cash >= cost then
-                    -- Attempt purchase (with a couple retries). If purchase succeeds, wait until egg disappears before continuing.
+                    -- Attempt purchase with retries
                     local purchased = false
                     for attempt = 1, 3 do
                         if not autoEnabled then break end
                         purchased = attemptPurchaseFromInfo(current, true)
                         if purchased then break end
-                        task.wait(0.6)
+                        task.wait(purchaseRetryDelay)
                     end
 
                     if purchased then
                         waitUntilNoEgg(10)
                         task.wait(0.25)
-                        -- After successful purchase, continue loop (we will not request new eggs until egg is gone)
-                        continue
                     else
-                        -- Purchase failed despite having enough cash; back off and re-evaluate
-                        waitUntilNoEgg(10)
+                        waitUntilNoEgg(12)
                         task.wait(0.25)
-                        continue
                     end
                 else
-                    -- Allowed but unaffordable: DO NOT request new eggs. Wait until we have enough money or egg disappears.
+                    -- Can't afford: wait until we have enough or egg disappears
                     local affordTimeout = 180
                     local start = tick()
                     while autoEnabled and (tick() - start) < affordTimeout do
@@ -469,87 +543,54 @@ do
                             if purchased then waitUntilNoEgg(10) end
                             break
                         end
-                        task.wait(0.5)
+                        task.wait(math.max(0.25, pollInterval))
                     end
                     task.wait(0.25)
-                    continue
-                end
-            end
-
-            -- If we reach here: either no egg present, or current egg is not allowed.
-            -- We will request an egg, then wait 1 second, then re-evaluate. This yields ~60 requests/minute.
-            if requestEggRemote and autoEnabled then
-                pcall(function()
-                    local args = {
-                        {
-                            __raw = true,
-                            data = {}
-                        }
-                    }
-                    requestEggRemote:FireServer(unpack(args))
-                end)
-            end
-
-            -- Wait 1 second (this is the key change: spawn, wait 1s, spawn again)
-            local waited = 0
-            while autoEnabled and waited < 1.0 do
-                task.wait(0.12)
-                waited = waited + 0.12
-            end
-
-            -- After waiting 1s, re-scan and handle any allowed egg that appeared.
-            local ok2, eggsAfter = pcall(function() return getAllSpawnedEggsInfo() end)
-            if ok2 and eggsAfter and #eggsAfter > 0 then
-                local newEgg = eggsAfter[1]
-                if isEggAllowed(newEgg) then
-                    local cash = getPlayerCash()
-                    local cost = tonumber(newEgg.PriceNum) or 0
-                    if cost > 0 and cash >= cost then
-                        -- Attempt purchase immediately (with small retries)
-                        local purchased = false
-                        for attempt = 1, 3 do
-                            if not autoEnabled then break end
-                            purchased = attemptPurchaseFromInfo(newEgg, true)
-                            if purchased then break end
-                            task.wait(0.6)
-                        end
-                        if purchased then
-                            waitUntilNoEgg(10)
-                            task.wait(0.25)
-                            -- continue main loop
-                        else
-                            -- purchase failed; wait until egg disappears before continuing
-                            waitUntilNoEgg(10)
-                            task.wait(0.25)
-                        end
-                    else
-                        -- allowed but unaffordable: do not request new eggs; wait until we can afford or egg disappears
-                        local affordTimeout = 180
-                        local start = tick()
-                        while autoEnabled and (tick() - start) < affordTimeout do
-                            local newCash = getPlayerCash()
-                            local ok3, eggsCheck = pcall(function() return getAllSpawnedEggsInfo() end)
-                            if ok3 and (not eggsCheck or #eggsCheck == 0) then break end
-                            if newCash >= cost then
-                                local purchased = attemptPurchaseFromInfo(newEgg, true)
-                                if purchased then waitUntilNoEgg(10) end
-                                break
-                            end
-                            task.wait(0.5)
-                        end
-                    end
-                else
-                    -- newEgg is not allowed: loop will request again after the 1s wait (keeps ~60/min pace)
-                    -- small pause to avoid tight loop
-                    task.wait(0.05)
                 end
             else
-                -- no egg detected after request; continue loop and request again after 1s
-                task.wait(0.05)
+                -- No allowed egg present: request a new spawn (respect spawnInterval and cooldown)
+                if not replacing and tick() - lastRequestTime >= requestCooldown then
+                    if requestEggRemote then
+                        pcall(function()
+                            local args = {
+                                {
+                                    __raw = true,
+                                    data = {}
+                                }
+                            }
+                            requestEggRemote:FireServer(unpack(args))
+                        end)
+                        lastRequestTime = tick()
+                    end
+                end
+
+                -- Wait spawnInterval seconds (user-controlled) before next request
+                local waited = 0
+                while autoEnabled and waited < spawnInterval do
+                    task.wait(math.min(0.12, spawnInterval))
+                    waited = waited + math.min(0.12, spawnInterval)
+                end
+
+                -- After waiting, re-scan and if a not-allowed egg is present, try controlled replacement
+                local ok2, eggsAfter = pcall(function() return getAllSpawnedEggsInfo() end)
+                if ok2 and eggsAfter and #eggsAfter > 0 then
+                    local newEgg = eggsAfter[1]
+                    if not isEggAllowed(newEgg) and not replacing then
+                        -- try to replace aggressively but controlled
+                        local allowedEgg = aggressiveReplaceUntilAllowed(newEgg)
+                        if allowedEgg then
+                            local cash = getPlayerCash()
+                            local cost = tonumber(allowedEgg.PriceNum) or 0
+                            if cost > 0 and cash >= cost then
+                                local purchased = attemptPurchaseFromInfo(allowedEgg, true)
+                                if purchased then waitUntilNoEgg(10) end
+                            end
+                        end
+                    end
+                end
             end
 
-            -- small cycle delay to keep loop responsive but not aggressive
-            task.wait(0.05)
+            task.wait(math.max(0.05, pollInterval * 0.5))
         end
     end
 
@@ -559,14 +600,14 @@ do
         CurrentValue = false,
         Flag = "AutoSpawnBuyEggs",
         Callback = function(val)
-            if val then
+            autoEnabled = val
+            if autoEnabled then
                 if not autoThread or coroutine.status(autoThread) ~= "running" then
                     autoThread = spawn(function()
                         autoSpawnBuyLoop()
                     end)
                 end
             end
-            autoEnabled = val
         end
     })
 end
