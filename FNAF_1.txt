@@ -109,7 +109,7 @@ end
 -- Load (or create) configuration so Rayfield can restore UI state if needed
 pcall(function() Rayfield:LoadConfiguration() end)
 
--- Egg Status UI (always enabled; toggle removed)
+-- Egg Status UI and Auto Spawn/Buy logic
 do
     local Players = game:GetService("Players")
     local Rep = game:GetService("ReplicatedStorage")
@@ -148,11 +148,10 @@ do
         return false
     end
 
-    -- Create dropdowns only when API is ready
+    -- Create dropdowns only when API is ready (Rayfield expects MultipleOptions key)
     if not waitForStatusTab(StatusTab, 6) then
         warn("StatusTab or CreateDropdown not available; dropdowns not created.")
     else
-        -- Rarities dropdown (multi-select)
         local RaritiesDropdown = StatusTab:CreateDropdown({
             Name = "Rarities",
             Options = RARITY_OPTIONS,
@@ -173,7 +172,6 @@ do
             end,
         })
 
-        -- Initialize from saved/current options if available
         pcall(function()
             local init = (RaritiesDropdown and RaritiesDropdown.CurrentOption) or copyList(RARITY_OPTIONS)
             if type(init) == "table" then
@@ -184,7 +182,6 @@ do
             end
         end)
 
-        -- Varieties dropdown (multi-select)
         local VarietiesDropdown = StatusTab:CreateDropdown({
             Name = "Varieties",
             Options = VARIETY_OPTIONS,
@@ -216,50 +213,29 @@ do
         end)
     end
 
-    -- Always enabled; user cannot disable
-    local enabled = true
-
-    -- Robust reader: returns text/value from common GUI/value objects
+    -- Utility: read text/value from GUI/value objects
     local function readTextOrValue(inst)
         if not inst then return nil end
-
         if inst:IsA("TextLabel") or inst:IsA("TextBox") or inst:IsA("TextButton") then
-            if type(inst.Text) == "string" and inst.Text ~= "" then
-                return inst.Text
-            end
+            if type(inst.Text) == "string" and inst.Text ~= "" then return inst.Text end
         end
-
-        if inst:IsA("ValueBase") and inst.Value ~= nil then
-            return tostring(inst.Value)
-        end
-
+        if inst:IsA("ValueBase") and inst.Value ~= nil then return tostring(inst.Value) end
         local ok, txt = pcall(function() return inst.Text end)
         if ok and type(txt) == "string" and txt ~= "" then return txt end
         local ok2, val = pcall(function() return inst.Value end)
         if ok2 and val ~= nil then return tostring(val) end
-
         for _, c in ipairs(inst:GetChildren()) do
             if c:IsA("TextLabel") or c:IsA("TextBox") or c:IsA("TextButton") then
-                if type(c.Text) == "string" and c.Text ~= "" then
-                    return c.Text
-                end
+                if type(c.Text) == "string" and c.Text ~= "" then return c.Text end
             end
-            if c:IsA("ValueBase") and c.Value ~= nil then
-                return tostring(c.Value)
-            end
+            if c:IsA("ValueBase") and c.Value ~= nil then return tostring(c.Value) end
         end
-
         for _, d in ipairs(inst:GetDescendants()) do
             if d:IsA("TextLabel") or d:IsA("TextBox") or d:IsA("TextButton") then
-                if type(d.Text) == "string" and d.Text ~= "" then
-                    return d.Text
-                end
+                if type(d.Text) == "string" and d.Text ~= "" then return d.Text end
             end
-            if d:IsA("ValueBase") and d.Value ~= nil then
-                return tostring(d.Value)
-            end
+            if d:IsA("ValueBase") and d.Value ~= nil then return tostring(d.Value) end
         end
-
         return nil
     end
 
@@ -287,7 +263,6 @@ do
         if not container then return nil end
         local lowerCandidates = {}
         for _, n in ipairs(nameCandidates) do lowerCandidates[#lowerCandidates+1] = string.lower(n) end
-
         for _, child in ipairs(container:GetChildren()) do
             local lname = string.lower(child.Name or "")
             for _, cand in ipairs(lowerCandidates) do
@@ -297,7 +272,6 @@ do
                 end
             end
         end
-
         for _, desc in ipairs(container:GetDescendants()) do
             local lname = string.lower(desc.Name or "")
             for _, cand in ipairs(lowerCandidates) do
@@ -307,21 +281,14 @@ do
                 end
             end
         end
-
         for _, child in ipairs(container:GetChildren()) do
             local v = readTextOrValue(child)
-            if v and v ~= "" then
-                return v
-            end
+            if v and v ~= "" then return v end
         end
-
         for _, desc in ipairs(container:GetDescendants()) do
             local v = readTextOrValue(desc)
-            if v and v ~= "" then
-                return v
-            end
+            if v and v ~= "" then return v end
         end
-
         return nil
     end
 
@@ -333,12 +300,10 @@ do
                 local tag = child:FindFirstChild("Eggtag")
                 if tag and tag:FindFirstChild("Container") then
                     local container = tag.Container
-
                     local priceStr = findFieldValue(container, {"Price", "price", "Cost", "cost", "Amount"}) or "N/A"
                     local priceNum = parsePriceToNumber(priceStr) or 0
                     local rarity = findFieldValue(container, {"Rarity", "rarity", "Tier", "tier"}) or "N/A"
                     local variety = findFieldValue(container, {"Variety", "variety", "Type", "type", "Mutation", "mutation"}) or "N/A"
-
                     local eggName = tostring(child.Name or "Unknown")
                     table.insert(results, {
                         Name = eggName,
@@ -356,9 +321,7 @@ do
 
     -- Formats a list of egg infos into a string for the paragraph
     local function formatEggsForDisplay(eggs)
-        if not eggs or #eggs == 0 then
-            return "No egg detected."
-        end
+        if not eggs or #eggs == 0 then return "No egg detected." end
         local lines = {}
         for i, e in ipairs(eggs) do
             local line = string.format("%d) Name: %s | Price: %s | Rarity: %s | Variety: %s", i, tostring(e.Name), tostring(e.Price), tostring(e.Rarity), tostring(e.Variety))
@@ -370,23 +333,14 @@ do
     -- Updater loop (always running) to refresh the status paragraph
     spawn(function()
         while true do
-            if enabled then
-                local ok, eggs = pcall(function()
-                    return getAllSpawnedEggsInfo()
-                end)
-
-                if ok and eggs and #eggs > 0 then
-                    local content = formatEggsForDisplay(eggs)
-                    pcall(function()
-                        StatusParagraph:Set({Title = "Egg Status", Content = content})
-                    end)
-                else
-                    pcall(function()
-                        StatusParagraph:Set({Title = "Egg Status", Content = "No egg detected."})
-                    end)
-                end
+            local ok, eggs = pcall(function() return getAllSpawnedEggsInfo() end)
+            if ok and eggs and #eggs > 0 then
+                local content = formatEggsForDisplay(eggs)
+                pcall(function() StatusParagraph:Set({Title = "Egg Status", Content = content}) end)
+            else
+                pcall(function() StatusParagraph:Set({Title = "Egg Status", Content = "No egg detected."}) end)
             end
-            task.wait(0.6) -- slightly slower UI refresh to reduce noise
+            task.wait(0.6)
         end
     end)
 
@@ -401,15 +355,13 @@ do
     local requestEggRemote = getRemote("_requestEgg")
     local purchaseEggRemote = getRemote("_purchaseEgg")
 
-    -- waitUntilNoEgg: shorter timeout and faster poll
+    -- Wait until no egg present (poll)
     local function waitUntilNoEgg(timeout)
         local start = tick()
         local poll = 0.18
         while (tick() - start) < (timeout or 8) do
             local ok, eggs = pcall(function() return getAllSpawnedEggsInfo() end)
-            if ok and (not eggs or #eggs == 0) then
-                return true
-            end
+            if ok and (not eggs or #eggs == 0) then return true end
             task.wait(poll)
         end
         return false
@@ -424,7 +376,7 @@ do
         local varietyPart = tostring(eggInfo.Variety or "Glitch")
         local idString = "entity_" .. namePart .. "_egg"
 
-        local okFire, errFire = pcall(function()
+        local okFire = pcall(function()
             local args = {
                 {
                     __raw = true,
@@ -437,32 +389,21 @@ do
             }
             purchaseEggRemote:FireServer(unpack(args))
         end)
-        if not okFire then
-            return false
-        end
+        if not okFire then return false end
 
-        if not waitForDisappear then
-            return true
-        end
+        if not waitForDisappear then return true end
 
-        -- Wait a short time to see if the egg disappears (indicates purchase succeeded)
         local start = tick()
         local timeout = 5
         local poll = 0.18
         while (tick() - start) < timeout do
             local ok, eggs = pcall(function() return getAllSpawnedEggsInfo() end)
             if ok then
-                if not eggs or #eggs == 0 then
-                    return true
-                end
-                if tostring(eggs[1].Name or "") ~= tostring(eggInfo.Name or "") then
-                    return true
-                end
+                if not eggs or #eggs == 0 then return true end
+                if tostring(eggs[1].Name or "") ~= tostring(eggInfo.Name or "") then return true end
             end
             task.wait(poll)
         end
-
-        -- If we reach here, the egg is still present -> purchase likely failed (insufficient funds or server rejection)
         return false
     end
 
@@ -473,212 +414,142 @@ do
         local v = tostring(eggInfo.Variety or ""):gsub("^%s*(.-)%s*$", "%1")
         local rl = string.lower(r)
         local vl = string.lower(v)
-        if next(selectedRarities) == nil or next(selectedVarieties) == nil then
-            return false
-        end
+        if next(selectedRarities) == nil or next(selectedVarieties) == nil then return false end
         return selectedRarities[rl] == true and selectedVarieties[vl] == true
     end
 
-    -- State & timing controls to avoid racing and skipping
+    -- Core loop: spawn ~60 eggs/min by requesting every 1s when appropriate.
     local autoEnabled = false
     local autoThread = nil
-    local replacing = false            -- true while aggressive replacement is active
-    local lastRequestTime = 0
-    local requestCooldown = 0.22       -- minimum seconds between requestEgg calls
-    local SAFETY_MAX_ATTEMPTS = 12     -- cap for aggressive replacement
-    local ATTEMPT_DELAY = 0.18         -- delay between replacement attempts
 
-    -- Aggressive replace but slower and with locking to avoid skipping allowed eggs
-    local function aggressiveReplaceUntilAllowed(currentEgg)
-        replacing = true
-        local startName = tostring(currentEgg.Name or "")
-        for attempt = 1, SAFETY_MAX_ATTEMPTS do
-            if not autoEnabled then break end
-
-            -- Respect cooldown to avoid spamming and to give server time to change egg
-            if tick() - lastRequestTime >= requestCooldown then
-                if requestEggRemote then
-                    pcall(function()
-                        local args = {
-                            {
-                                __raw = true,
-                                data = {}
-                            }
-                        }
-                        requestEggRemote:FireServer(unpack(args))
-                    end)
-                end
-                lastRequestTime = tick()
-            end
-
-            task.wait(ATTEMPT_DELAY)
-
-            local ok, eggsAfter = pcall(function() return getAllSpawnedEggsInfo() end)
-            if ok and eggsAfter and #eggsAfter > 0 then
-                local newEgg = eggsAfter[1]
-                local newName = tostring(newEgg.Name or "")
-                if newName ~= startName then
-                    -- If changed, check if allowed
-                    if isEggAllowed(newEgg) then
-                        replacing = false
-                        return newEgg
-                    else
-                        -- changed but not allowed; update and continue
-                        startName = newName
-                    end
-                else
-                    -- same egg; continue attempts (server may be rate-limiting)
-                end
-            else
-                -- no egg present; wait a bit for server to spawn then continue
-                task.wait(0.25)
-            end
-        end
-        replacing = false
-        return nil
-    end
-
-    -- Core loop: deterministic, slower, and avoids skipping allowed eggs
     local function autoSpawnBuyLoop()
+        -- We will request an egg, wait 1s, request another, etc. If an allowed & affordable egg appears we buy it and then wait until it's gone.
         while autoEnabled do
-            -- Always re-scan at loop start
+            -- Re-scan current eggs
             local ok, eggsNow = pcall(function() return getAllSpawnedEggsInfo() end)
             if not ok then eggsNow = {} end
             local current = (eggsNow and #eggsNow > 0) and eggsNow[1] or nil
 
-            if current then
-                -- If current egg is allowed
-                if isEggAllowed(current) then
-                    -- Stop any replacement activity
-                    replacing = false
+            if current and isEggAllowed(current) then
+                -- Allowed egg present. Check affordability.
+                local cash = getPlayerCash()
+                local cost = tonumber(current.PriceNum) or 0
 
-                    -- Check affordability
-                    local cash = getPlayerCash()
-                    local cost = tonumber(current.PriceNum) or 0
+                if cost > 0 and cash >= cost then
+                    -- Attempt purchase (with a couple retries). If purchase succeeds, wait until egg disappears before continuing.
+                    local purchased = false
+                    for attempt = 1, 3 do
+                        if not autoEnabled then break end
+                        purchased = attemptPurchaseFromInfo(current, true)
+                        if purchased then break end
+                        task.wait(0.6)
+                    end
 
-                    if cost > 0 and cash >= cost then
-                        -- Attempt purchase (retries allowed)
-                        local MAX_PURCHASE_RETRIES = 3
-                        local purchased = false
-                        for attempt = 1, MAX_PURCHASE_RETRIES do
-                            if not autoEnabled then break end
-                            purchased = attemptPurchaseFromInfo(current, true)
-                            if purchased then break end
-                            task.wait(0.6) -- slightly longer between purchase retries to avoid racing
+                    if purchased then
+                        waitUntilNoEgg(10)
+                        task.wait(0.25)
+                        -- After successful purchase, continue loop (we will not request new eggs until egg is gone)
+                        continue
+                    else
+                        -- Purchase failed despite having enough cash; back off and re-evaluate
+                        waitUntilNoEgg(10)
+                        task.wait(0.25)
+                        continue
+                    end
+                else
+                    -- Allowed but unaffordable: DO NOT request new eggs. Wait until we have enough money or egg disappears.
+                    local affordTimeout = 180
+                    local start = tick()
+                    while autoEnabled and (tick() - start) < affordTimeout do
+                        local newCash = getPlayerCash()
+                        local ok2, eggsCheck = pcall(function() return getAllSpawnedEggsInfo() end)
+                        if ok2 and (not eggsCheck or #eggsCheck == 0) then break end
+                        if newCash >= cost then
+                            local purchased = attemptPurchaseFromInfo(current, true)
+                            if purchased then waitUntilNoEgg(10) end
+                            break
                         end
+                        task.wait(0.5)
+                    end
+                    task.wait(0.25)
+                    continue
+                end
+            end
 
+            -- If we reach here: either no egg present, or current egg is not allowed.
+            -- We will request an egg, then wait 1 second, then re-evaluate. This yields ~60 requests/minute.
+            if requestEggRemote and autoEnabled then
+                pcall(function()
+                    local args = {
+                        {
+                            __raw = true,
+                            data = {}
+                        }
+                    }
+                    requestEggRemote:FireServer(unpack(args))
+                end)
+            end
+
+            -- Wait 1 second (this is the key change: spawn, wait 1s, spawn again)
+            local waited = 0
+            while autoEnabled and waited < 1.0 do
+                task.wait(0.12)
+                waited = waited + 0.12
+            end
+
+            -- After waiting 1s, re-scan and handle any allowed egg that appeared.
+            local ok2, eggsAfter = pcall(function() return getAllSpawnedEggsInfo() end)
+            if ok2 and eggsAfter and #eggsAfter > 0 then
+                local newEgg = eggsAfter[1]
+                if isEggAllowed(newEgg) then
+                    local cash = getPlayerCash()
+                    local cost = tonumber(newEgg.PriceNum) or 0
+                    if cost > 0 and cash >= cost then
+                        -- Attempt purchase immediately (with small retries)
+                        local purchased = false
+                        for attempt = 1, 3 do
+                            if not autoEnabled then break end
+                            purchased = attemptPurchaseFromInfo(newEgg, true)
+                            if purchased then break end
+                            task.wait(0.6)
+                        end
                         if purchased then
-                            -- Wait until egg is gone; do not request new eggs here
                             waitUntilNoEgg(10)
                             task.wait(0.25)
+                            -- continue main loop
                         else
-                            -- Purchase failed despite having enough cash; back off and re-evaluate
-                            waitUntilNoEgg(12)
+                            -- purchase failed; wait until egg disappears before continuing
+                            waitUntilNoEgg(10)
                             task.wait(0.25)
                         end
                     else
-                        -- Can't afford: DO NOT request new eggs. Wait until we have enough money or egg disappears.
-                        local affordTimeout = 180 -- longer wait to avoid rapid polling
+                        -- allowed but unaffordable: do not request new eggs; wait until we can afford or egg disappears
+                        local affordTimeout = 180
                         local start = tick()
                         while autoEnabled and (tick() - start) < affordTimeout do
                             local newCash = getPlayerCash()
-                            local ok2, eggsCheck = pcall(function() return getAllSpawnedEggsInfo() end)
-                            if ok2 and (not eggsCheck or #eggsCheck == 0) then
-                                break -- egg disappeared
-                            end
+                            local ok3, eggsCheck = pcall(function() return getAllSpawnedEggsInfo() end)
+                            if ok3 and (not eggsCheck or #eggsCheck == 0) then break end
                             if newCash >= cost then
-                                -- Try purchase once
-                                local purchased = attemptPurchaseFromInfo(current, true)
-                                if purchased then
-                                    waitUntilNoEgg(10)
-                                end
+                                local purchased = attemptPurchaseFromInfo(newEgg, true)
+                                if purchased then waitUntilNoEgg(10) end
                                 break
                             end
                             task.wait(0.5)
                         end
-                        task.wait(0.25)
                     end
                 else
-                    -- Current egg is NOT allowed
-                    -- If we're already replacing, let aggressiveReplaceUntilAllowed handle it
-                    if not replacing then
-                        local allowedEgg = aggressiveReplaceUntilAllowed(current)
-                        if allowedEgg then
-                            -- If allowed egg found, check affordability and attempt purchase
-                            local cash = getPlayerCash()
-                            local cost = tonumber(allowedEgg.PriceNum) or 0
-                            if cost > 0 and cash >= cost then
-                                local purchased = attemptPurchaseFromInfo(allowedEgg, true)
-                                if purchased then
-                                    waitUntilNoEgg(10)
-                                else
-                                    waitUntilNoEgg(12)
-                                end
-                            else
-                                -- allowed but unaffordable: stop requesting and wait for money
-                                local start = tick()
-                                local affordTimeout = 180
-                                while autoEnabled and (tick() - start) < affordTimeout do
-                                    local newCash = getPlayerCash()
-                                    local ok2, eggsCheck = pcall(function() return getAllSpawnedEggsInfo() end)
-                                    if ok2 and (not eggsCheck or #eggsCheck == 0) then break end
-                                    if newCash >= cost then
-                                        local purchased = attemptPurchaseFromInfo(allowedEgg, true)
-                                        if purchased then waitUntilNoEgg(10) end
-                                        break
-                                    end
-                                    task.wait(0.5)
-                                end
-                            end
-                        else
-                            -- No allowed egg found within safety cap; back off a bit
-                            task.wait(0.8)
-                        end
-                    else
-                        -- replacing == true: wait a short time for replacement to progress
-                        task.wait(0.18)
-                    end
+                    -- newEgg is not allowed: loop will request again after the 1s wait (keeps ~60/min pace)
+                    -- small pause to avoid tight loop
+                    task.wait(0.05)
                 end
             else
-                -- No egg present: request a new spawn, but respect cooldown and replacing flag
-                if not replacing and tick() - lastRequestTime >= requestCooldown then
-                    if requestEggRemote then
-                        pcall(function()
-                            local args = {
-                                {
-                                    __raw = true,
-                                    data = {}
-                                }
-                            }
-                            requestEggRemote:FireServer(unpack(args))
-                        end)
-                        lastRequestTime = tick()
-                    end
-                end
-
-                -- Wait for detection (slower polling to avoid skipping)
-                local detectedEgg = nil
-                local startTime = tick()
-                local timeout = 6
-                local pollInterval = 0.18
-                while autoEnabled and (tick() - startTime) < timeout do
-                    local ok2, eggs = pcall(function() return getAllSpawnedEggsInfo() end)
-                    if ok2 and eggs and #eggs > 0 then
-                        detectedEgg = eggs[1]
-                        break
-                    end
-                    task.wait(pollInterval)
-                end
-                -- next loop iteration will handle detectedEgg
+                -- no egg detected after request; continue loop and request again after 1s
+                task.wait(0.05)
             end
 
-            -- Short cycle delay (keeps loop responsive but not too aggressive)
-            local cycleDelay = 0.25
-            local waited = 0
-            while autoEnabled and waited < cycleDelay do
-                task.wait(0.08)
-                waited = waited + 0.08
-            end
+            -- small cycle delay to keep loop responsive but not aggressive
+            task.wait(0.05)
         end
     end
 
@@ -688,14 +559,14 @@ do
         CurrentValue = false,
         Flag = "AutoSpawnBuyEggs",
         Callback = function(val)
-            autoEnabled = val
-            if autoEnabled then
+            if val then
                 if not autoThread or coroutine.status(autoThread) ~= "running" then
                     autoThread = spawn(function()
                         autoSpawnBuyLoop()
                     end)
                 end
             end
+            autoEnabled = val
         end
     })
 end
