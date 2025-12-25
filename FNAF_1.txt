@@ -88,6 +88,69 @@ do
     local StatusSection = StatusTab:CreateSection("Spawned Egg Status")
     local StatusParagraph = StatusTab:CreateParagraph({Title = "Egg Status", Content = "Searching for spawned egg..."})
 
+    -- Filter UI section
+    local FilterSection = StatusTab:CreateSection("Filters")
+    -- Rarity and Variety options
+    local RARITY_OPTIONS = {"Normal", "Rare", "Epic", "Legendary", "Mythic", "Secret"}
+    local VARIETY_OPTIONS = {"Normal", "Golden", "Diamond", "Glitch", "Galaxy", "????"}
+
+    -- Default: all selected
+    local selectedRarities = {}
+    local selectedVarieties = {}
+    for _, v in ipairs(RARITY_OPTIONS) do selectedRarities[string.lower(v)] = true end
+    for _, v in ipairs(VARIETY_OPTIONS) do selectedVarieties[string.lower(v)] = true end
+
+    -- Helper to convert a list to Rayfield's expected CurrentOption (table)
+    local function copyList(tbl)
+        local out = {}
+        for i, v in ipairs(tbl) do out[i] = v end
+        return out
+    end
+
+    -- Create dropdowns (multi-select). Rayfield dropdown APIs vary; this uses common Rayfield pattern.
+    -- If your Rayfield version uses different keys for multi-select, adjust accordingly.
+    StatusTab:CreateDropdown({
+        Name = "Rarities",
+        Options = RARITY_OPTIONS,
+        CurrentOption = copyList(RARITY_OPTIONS),
+        Flag = "RaritiesFilter",
+        Multi = true,
+        Callback = function(selection)
+            -- selection is expected to be a table of selected strings
+            -- reset and populate selectedRarities set
+            selectedRarities = {}
+            if type(selection) == "table" then
+                for _, s in ipairs(selection) do
+                    if type(s) == "string" then
+                        selectedRarities[string.lower(s)] = true
+                    end
+                end
+            elseif type(selection) == "string" then
+                selectedRarities[string.lower(selection)] = true
+            end
+        end
+    })
+
+    StatusTab:CreateDropdown({
+        Name = "Varieties",
+        Options = VARIETY_OPTIONS,
+        CurrentOption = copyList(VARIETY_OPTIONS),
+        Flag = "VarietiesFilter",
+        Multi = true,
+        Callback = function(selection)
+            selectedVarieties = {}
+            if type(selection) == "table" then
+                for _, s in ipairs(selection) do
+                    if type(s) == "string" then
+                        selectedVarieties[string.lower(s)] = true
+                    end
+                end
+            elseif type(selection) == "string" then
+                selectedVarieties[string.lower(selection)] = true
+            end
+        end
+    })
+
     -- Always enabled; user cannot disable
     local enabled = true
 
@@ -299,18 +362,54 @@ do
             return ok
         end
 
+        -- Helper: check if both rarity and variety are allowed (both must match)
+        local function isEggAllowed(eggInfo)
+            if not eggInfo then return false end
+            local r = tostring(eggInfo.Rarity or ""):gsub("^%s*(.-)%s*$", "%1")
+            local v = tostring(eggInfo.Variety or ""):gsub("^%s*(.-)%s*$", "%1")
+            local rl = string.lower(r)
+            local vl = string.lower(v)
+            -- If selected sets are empty, treat as "none selected" -> disallow everything.
+            -- This preserves explicit user control. If you prefer "none selected = allow all", change logic.
+            if next(selectedRarities) == nil or next(selectedVarieties) == nil then
+                return false
+            end
+            return selectedRarities[rl] == true and selectedVarieties[vl] == true
+        end
+
         -- Core loop (sped up)
         local function autoSpawnBuyLoop()
             while autoEnabled do
-                -- If an egg exists, try to purchase it and wait until it's gone
+                -- If an egg exists, evaluate it
                 local ok, eggsNow = pcall(function() return getAllSpawnedEggsInfo() end)
                 if ok and eggsNow and #eggsNow > 0 then
-                    pcall(function()
-                        attemptPurchaseFromInfo(eggsNow[1])
-                    end)
-                    waitUntilNoEgg(8)
-                    task.wait(0.18)
-                    continue
+                    local current = eggsNow[1]
+                    -- If allowed, attempt purchase and wait until cleared
+                    if isEggAllowed(current) then
+                        pcall(function()
+                            attemptPurchaseFromInfo(current)
+                        end)
+                        waitUntilNoEgg(8)
+                        task.wait(0.18)
+                        continue
+                    else
+                        -- Not allowed: request a different egg immediately (user requested behavior)
+                        if requestEggRemote then
+                            pcall(function()
+                                local args = {
+                                    {
+                                        __raw = true,
+                                        data = {}
+                                    }
+                                }
+                                requestEggRemote:FireServer(unpack(args))
+                            end)
+                        end
+                        -- small pause to avoid spamming and allow server to process
+                        task.wait(0.18)
+                        -- continue loop to re-evaluate current egg or new egg
+                        continue
+                    end
                 end
 
                 -- If no egg detected, request a new spawn
@@ -340,12 +439,28 @@ do
                     task.wait(pollInterval)
                 end
 
-                -- If detected, attempt purchase and wait until cleared
-                if detectedEgg and purchaseEggRemote then
-                    pcall(function()
-                        attemptPurchaseFromInfo(detectedEgg)
-                    end)
-                    waitUntilNoEgg(8)
+                -- If detected, check filters and act accordingly
+                if detectedEgg then
+                    if isEggAllowed(detectedEgg) then
+                        pcall(function()
+                            attemptPurchaseFromInfo(detectedEgg)
+                        end)
+                        waitUntilNoEgg(8)
+                    else
+                        -- Not allowed: request another spawn and continue
+                        if requestEggRemote then
+                            pcall(function()
+                                local args = {
+                                    {
+                                        __raw = true,
+                                        data = {}
+                                    }
+                                }
+                                requestEggRemote:FireServer(unpack(args))
+                            end)
+                        end
+                        task.wait(0.18)
+                    end
                 end
 
                 -- Shorter cycle delay to speed up loop
@@ -376,3 +491,4 @@ do
         })
     end
 end
+
