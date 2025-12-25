@@ -231,7 +231,7 @@ do
                     end)
                 end
             end
-            wait(0.5)
+            task.wait(0.5)
         end
     end)
 
@@ -262,15 +262,16 @@ do
         local requestEggRemote = getRemote("_requestEgg")
         local purchaseEggRemote = getRemote("_purchaseEgg")
 
-        -- Wait until no egg is detected or timeout (returns true if cleared)
+        -- Faster waitUntilNoEgg: shorter timeout and faster poll
         local function waitUntilNoEgg(timeout)
             local start = tick()
-            while (tick() - start) < (timeout or 20) do
+            local poll = 0.12
+            while (tick() - start) < (timeout or 8) do
                 local ok, eggs = pcall(function() return getAllSpawnedEggsInfo() end)
                 if ok and (not eggs or #eggs == 0) then
                     return true
                 end
-                wait(0.4)
+                task.wait(poll)
             end
             return false
         end
@@ -298,25 +299,21 @@ do
             return ok
         end
 
-        -- Core loop
+        -- Core loop (sped up)
         local function autoSpawnBuyLoop()
             while autoEnabled do
-                -- First: if an egg is currently detected, try to purchase it and wait until it's gone
+                -- If an egg exists, try to purchase it and wait until it's gone
                 local ok, eggsNow = pcall(function() return getAllSpawnedEggsInfo() end)
                 if ok and eggsNow and #eggsNow > 0 then
-                    -- Try to purchase the first detected egg
                     pcall(function()
                         attemptPurchaseFromInfo(eggsNow[1])
                     end)
-                    -- Wait until egg is no longer detected (or timeout)
-                    waitUntilNoEgg(20)
-                    -- After waiting, continue to next cycle (do not request a new egg until cleared)
-                    -- small pause to avoid tight loop
-                    wait(0.6)
+                    waitUntilNoEgg(8)
+                    task.wait(0.18)
                     continue
                 end
 
-                -- If no egg detected, it's safe to request a new spawn
+                -- If no egg detected, request a new spawn
                 if requestEggRemote then
                     pcall(function()
                         local args = {
@@ -329,34 +326,34 @@ do
                     end)
                 end
 
-                -- Wait for detection (poll getAllSpawnedEggsInfo)
+                -- Wait for detection (faster polling, shorter timeout)
                 local detectedEgg = nil
                 local startTime = tick()
-                local timeout = 12 -- seconds to wait for an egg to appear
+                local timeout = 6 -- seconds to wait for an egg to appear (reduced)
+                local pollInterval = 0.12
                 while autoEnabled and (tick() - startTime) < timeout do
                     local ok2, eggs = pcall(function() return getAllSpawnedEggsInfo() end)
                     if ok2 and eggs and #eggs > 0 then
-                        detectedEgg = eggs[1] -- use first detected egg
+                        detectedEgg = eggs[1]
                         break
                     end
-                    wait(0.4)
+                    task.wait(pollInterval)
                 end
 
-                -- If detected, attempt purchase and then wait until cleared before next request
+                -- If detected, attempt purchase and wait until cleared
                 if detectedEgg and purchaseEggRemote then
                     pcall(function()
                         attemptPurchaseFromInfo(detectedEgg)
                     end)
-                    -- Wait until egg disappears (or timeout) before next spawn request
-                    waitUntilNoEgg(20)
+                    waitUntilNoEgg(8)
                 end
 
-                -- Small delay before next cycle to avoid spamming
-                local cycleDelay = 1.0
+                -- Shorter cycle delay to speed up loop
+                local cycleDelay = 0.3
                 local waited = 0
                 while autoEnabled and waited < cycleDelay do
-                    wait(0.2)
-                    waited = waited + 0.2
+                    task.wait(0.06)
+                    waited = waited + 0.06
                 end
             end
         end
