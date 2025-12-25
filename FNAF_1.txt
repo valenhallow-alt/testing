@@ -109,595 +109,709 @@ end
 -- Load (or create) configuration so Rayfield can restore UI state if needed
 pcall(function() Rayfield:LoadConfiguration() end)
 
--- Egg Status UI and Auto Spawn/Buy logic
-do
-    local Players = game:GetService("Players")
-    local Rep = game:GetService("ReplicatedStorage")
+-- Services
+local Players = game:GetService("Players")
+local Rep = game:GetService("ReplicatedStorage")
 
-    local StatusTab = Window:CreateTab("Egg Status", 4483362458)
-    local StatusSection = StatusTab:CreateSection("Spawned Egg Status")
-    local StatusParagraph = StatusTab:CreateParagraph({Title = "Egg Status", Content = "Searching for spawned egg..."})
-
-    -- Filter UI section
-    local FilterSection = StatusTab:CreateSection("Filters")
-    local RARITY_OPTIONS = {"Basic", "Rare", "Epic", "Legendary", "Mythic", "Secret"}
-    local VARIETY_OPTIONS = {"Normal", "Golden", "Diamond", "Glitch", "Galaxy", "????"}
-
-    -- Selected sets (lowercase keys)
-    local selectedRarities = {}
-    local selectedVarieties = {}
-    for _, v in ipairs(RARITY_OPTIONS) do selectedRarities[string.lower(v)] = true end
-    for _, v in ipairs(VARIETY_OPTIONS) do selectedVarieties[string.lower(v)] = true end
-
-    local function copyList(tbl)
-        local out = {}
-        for i, v in ipairs(tbl) do out[i] = v end
-        return out
+-- Utility functions
+local function readTextOrValue(inst)
+    if not inst then return nil end
+    if inst:IsA("TextLabel") or inst:IsA("TextBox") or inst:IsA("TextButton") then
+        if type(inst.Text) == "string" and inst.Text ~= "" then return inst.Text end
     end
-
-    -- Speed control defaults (these will be driven by the slider)
-    local spawnInterval = 1.0          -- seconds between spawn requests (default 1s -> ~60/min)
-    local requestCooldown = 0.22       -- minimum seconds between requestEgg calls
-    local attemptDelay = 1.0           -- delay between replacement attempts
-    local pollInterval = 0.18          -- polling interval for status checks
-    local purchaseRetryDelay = 0.6     -- delay between purchase retries
-
-    -- Skip-if-too-expensive toggle (default off)
-    local skipIfTooExpensive = false
-
-    -- Apply slider value to all timing variables (keeps relationships sensible)
-    local function applySpeed(s)
-        spawnInterval = tonumber(s) or 1.0
-        requestCooldown = math.max(0.12, spawnInterval * 0.22)
-        attemptDelay = math.max(0.12, spawnInterval)
-        pollInterval = math.max(0.08, spawnInterval * 0.18)
-        purchaseRetryDelay = math.max(0.4, spawnInterval * 0.6)
-    end
-
-    -- Initialize speeds
-    applySpeed(spawnInterval)
-
-    -- Wait helper for StatusTab API readiness
-    local function waitForStatusTab(tab, timeout)
-        timeout = timeout or 6
-        local start = tick()
-        while tick() - start < timeout do
-            if tab and type(tab.CreateDropdown) == "function" then
-                return true
-            end
-            task.wait(0.12)
+    if inst:IsA("ValueBase") and inst.Value ~= nil then return tostring(inst.Value) end
+    local ok, txt = pcall(function() return inst.Text end)
+    if ok and type(txt) == "string" and txt ~= "" then return txt end
+    local ok2, val = pcall(function() return inst.Value end)
+    if ok2 and val ~= nil then return tostring(val) end
+    for _, c in ipairs(inst:GetChildren()) do
+        if c:IsA("TextLabel") or c:IsA("TextBox") or c:IsA("TextButton") then
+            if type(c.Text) == "string" and c.Text ~= "" then return c.Text end
         end
-        return false
+        if c:IsA("ValueBase") and c.Value ~= nil then return tostring(c.Value) end
+    end
+    for _, d in ipairs(inst:GetDescendants()) do
+        if d:IsA("TextLabel") or d:IsA("TextBox") or d:IsA("TextButton") then
+            if type(d.Text) == "string" and d.Text ~= "" then return d.Text end
+        end
+        if d:IsA("ValueBase") and d.Value ~= nil then return tostring(d.Value) end
+    end
+    return nil
+end
+
+local function parsePriceToNumber(priceStr)
+    if not priceStr then return nil end
+    local cleaned = tostring(priceStr):gsub("[^%d%-]", "")
+    local n = tonumber(cleaned)
+    return n or nil
+end
+
+local function getPlayerCash()
+    local pl = Players.LocalPlayer
+    if not pl then return 0 end
+    local leaderstats = pl:FindFirstChild("leaderstats")
+    if not leaderstats then return 0 end
+    local cash = leaderstats:FindFirstChild("Cash")
+    if not cash then return 0 end
+    return tonumber(cash.Value) or 0
+end
+
+local function findFieldValue(container, nameCandidates)
+    if not container then return nil end
+    local lowerCandidates = {}
+    for _, n in ipairs(nameCandidates) do lowerCandidates[#lowerCandidates+1] = string.lower(n) end
+
+    for _, child in ipairs(container:GetChildren()) do
+        local lname = string.lower(child.Name or "")
+        for _, cand in ipairs(lowerCandidates) do
+            if lname == cand or lname:find(cand) then
+                local v = readTextOrValue(child)
+                if v and v ~= "" then return v end
+            end
+        end
     end
 
-    -- Create dropdowns, slider and the new toggle only when API is ready
-    if not waitForStatusTab(StatusTab, 6) then
-        warn("StatusTab or CreateDropdown not available; dropdowns not created.")
-    else
-        -- Rarities dropdown (multi-select)
-        local RaritiesDropdown = StatusTab:CreateDropdown({
-            Name = "Rarities",
-            Options = RARITY_OPTIONS,
-            CurrentOption = copyList(RARITY_OPTIONS),
-            MultipleOptions = true,
-            Flag = "RaritiesFilter",
-            Callback = function(selection)
-                selectedRarities = {}
-                if type(selection) == "table" then
-                    for _, s in ipairs(selection) do
-                        if type(s) == "string" then
-                            selectedRarities[string.lower(s)] = true
-                        end
-                    end
-                elseif type(selection) == "string" then
-                    selectedRarities[string.lower(selection)] = true
-                end
-            end,
-        })
+    for _, desc in ipairs(container:GetDescendants()) do
+        local lname = string.lower(desc.Name or "")
+        for _, cand in ipairs(lowerCandidates) do
+            if lname == cand or lname:find(cand) then
+                local v = readTextOrValue(desc)
+                if v and v ~= "" then return v end
+            end
+        end
+    end
 
-        pcall(function()
-            local init = (RaritiesDropdown and RaritiesDropdown.CurrentOption) or copyList(RARITY_OPTIONS)
-            if type(init) == "table" then
-                selectedRarities = {}
-                for _, s in ipairs(init) do
+    for _, child in ipairs(container:GetChildren()) do
+        local v = readTextOrValue(child)
+        if v and v ~= "" then return v end
+    end
+
+    for _, desc in ipairs(container:GetDescendants()) do
+        local v = readTextOrValue(desc)
+        if v and v ~= "" then return v end
+    end
+
+    return nil
+end
+
+local function getAllSpawnedEggsInfo()
+    local results = {}
+    for _, child in pairs(workspace:GetChildren()) do
+        if child and child:FindFirstChild("Eggtag") then
+            local tag = child:FindFirstChild("Eggtag")
+            if tag and tag:FindFirstChild("Container") then
+                local container = tag.Container
+                local priceStr = findFieldValue(container, {"Price", "price", "Cost", "cost", "Amount"}) or "N/A"
+                local priceNum = parsePriceToNumber(priceStr) or 0
+                local rarity = findFieldValue(container, {"Rarity", "rarity", "Tier", "tier"}) or "N/A"
+                local variety = findFieldValue(container, {"Variety", "variety", "Type", "type", "Mutation", "mutation"}) or "N/A"
+                local eggName = tostring(child.Name or "Unknown")
+                table.insert(results, {
+                    Name = eggName,
+                    Price = priceStr,
+                    PriceNum = priceNum,
+                    Rarity = rarity,
+                    Variety = variety,
+                    Container = container
+                })
+            end
+        end
+    end
+    return results
+end
+
+-- Rayfield UI: Egg Status tab
+local StatusTab = Window:CreateTab("Egg Status", 4483362458)
+local StatusSection = StatusTab:CreateSection("Spawned Egg Status")
+local StatusParagraph = StatusTab:CreateParagraph({Title = "Egg Status", Content = "Searching for spawned egg..."})
+
+-- Filters and controls
+local FilterSection = StatusTab:CreateSection("Filters")
+local RARITY_OPTIONS = {"Basic", "Rare", "Epic", "Legendary", "Mythic", "Secret"}
+local VARIETY_OPTIONS = {"Normal", "Golden", "Diamond", "Glitch", "Galaxy", "????"}
+
+local selectedRarities = {}
+local selectedVarieties = {}
+for _, v in ipairs(RARITY_OPTIONS) do selectedRarities[string.lower(v)] = true end
+for _, v in ipairs(VARIETY_OPTIONS) do selectedVarieties[string.lower(v)] = true end
+
+local function copyList(tbl)
+    local out = {}
+    for i, v in ipairs(tbl) do out[i] = v end
+    return out
+end
+
+-- Speed control defaults (driven by slider)
+local spawnInterval = 1.0          -- seconds between spawn requests (default 1s -> ~60/min)
+local requestCooldown = 0.22       -- minimum seconds between requestEgg calls
+local attemptDelay = 1.0           -- delay between replacement attempts
+local pollInterval = 0.18          -- polling interval for status checks
+local purchaseRetryDelay = 0.6     -- delay between purchase retries
+
+local function applySpeed(s)
+    spawnInterval = tonumber(s) or 1.0
+    requestCooldown = math.max(0.12, spawnInterval * 0.22)
+    attemptDelay = math.max(0.12, spawnInterval)
+    pollInterval = math.max(0.08, spawnInterval * 0.18)
+    purchaseRetryDelay = math.max(0.4, spawnInterval * 0.6)
+end
+applySpeed(spawnInterval)
+
+-- Wait helper for StatusTab API readiness
+local function waitForStatusTab(tab, timeout)
+    timeout = timeout or 6
+    local start = tick()
+    while tick() - start < timeout do
+        if tab and type(tab.CreateDropdown) == "function" then
+            return true
+        end
+        task.wait(0.12)
+    end
+    return false
+end
+
+-- Create dropdowns and slider
+if not waitForStatusTab(StatusTab, 6) then
+    warn("StatusTab or CreateDropdown not available; dropdowns not created.")
+else
+    local RaritiesDropdown = StatusTab:CreateDropdown({
+        Name = "Rarities",
+        Options = RARITY_OPTIONS,
+        CurrentOption = copyList(RARITY_OPTIONS),
+        MultipleOptions = true,
+        Flag = "RaritiesFilter",
+        Callback = function(selection)
+            selectedRarities = {}
+            if type(selection) == "table" then
+                for _, s in ipairs(selection) do
                     if type(s) == "string" then selectedRarities[string.lower(s)] = true end
                 end
+            elseif type(selection) == "string" then
+                selectedRarities[string.lower(selection)] = true
             end
-        end)
+        end,
+    })
 
-        -- Varieties dropdown (multi-select)
-        local VarietiesDropdown = StatusTab:CreateDropdown({
-            Name = "Varieties",
-            Options = VARIETY_OPTIONS,
-            CurrentOption = copyList(VARIETY_OPTIONS),
-            MultipleOptions = true,
-            Flag = "VarietiesFilter",
-            Callback = function(selection)
-                selectedVarieties = {}
-                if type(selection) == "table" then
-                    for _, s in ipairs(selection) do
-                        if type(s) == "string" then
-                            selectedVarieties[string.lower(s)] = true
-                        end
-                    end
-                elseif type(selection) == "string" then
-                    selectedVarieties[string.lower(selection)] = true
-                end
-            end,
-        })
-
-        pcall(function()
-            local init = (VarietiesDropdown and VarietiesDropdown.CurrentOption) or copyList(VARIETY_OPTIONS)
-            if type(init) == "table" then
-                selectedVarieties = {}
-                for _, s in ipairs(init) do
-                    if type(s) == "string" then selectedVarieties[string.lower(s)] = true end
-                end
-            end
-        end)
-
-        -- Slider: controls the global speed (0.3s - 1s)
-        local SpeedSlider = StatusTab:CreateSlider({
-            Name = "Spawn Interval (seconds)",
-            Range = {0.3, 1.0},
-            Increment = 0.05,
-            Suffix = "s",
-            CurrentValue = spawnInterval,
-            Flag = "SpawnInterval",
-            Callback = function(value)
-                applySpeed(value)
-            end,
-        })
-
-        -- New toggle: Skip if too expensive
-        StatusTab:CreateToggle({
-            Name = "Skip if too expensive",
-            CurrentValue = false,
-            Flag = "SkipIfTooExpensive",
-            Callback = function(val)
-                skipIfTooExpensive = val and true or false
-            end,
-        })
-    end
-
-    -- Utility: read text/value from GUI/value objects
-    local function readTextOrValue(inst)
-        if not inst then return nil end
-        if inst:IsA("TextLabel") or inst:IsA("TextBox") or inst:IsA("TextButton") then
-            if type(inst.Text) == "string" and inst.Text ~= "" then return inst.Text end
-        end
-        if inst:IsA("ValueBase") and inst.Value ~= nil then return tostring(inst.Value) end
-        local ok, txt = pcall(function() return inst.Text end)
-        if ok and type(txt) == "string" and txt ~= "" then return txt end
-        local ok2, val = pcall(function() return inst.Value end)
-        if ok2 and val ~= nil then return tostring(val) end
-        for _, c in ipairs(inst:GetChildren()) do
-            if c:IsA("TextLabel") or c:IsA("TextBox") or c:IsA("TextButton") then
-                if type(c.Text) == "string" and c.Text ~= "" then return c.Text end
-            end
-            if c:IsA("ValueBase") and c.Value ~= nil then return tostring(c.Value) end
-        end
-        for _, d in ipairs(inst:GetDescendants()) do
-            if d:IsA("TextLabel") or d:IsA("TextBox") or d:IsA("TextButton") then
-                if type(d.Text) == "string" and d.Text ~= "" then return d.Text end
-            end
-            if d:IsA("ValueBase") and d.Value ~= nil then return tostring(d.Value) end
-        end
-        return nil
-    end
-
-    -- Parse price string into a number (strip non-digits)
-    local function parsePriceToNumber(priceStr)
-        if not priceStr then return nil end
-        local cleaned = tostring(priceStr):gsub("[^%d%-]", "")
-        local n = tonumber(cleaned)
-        return n or nil
-    end
-
-    -- Get player's current cash (IntValue under leaderstats.Cash)
-    local function getPlayerCash()
-        local pl = Players.LocalPlayer
-        if not pl then return 0 end
-        local leaderstats = pl:FindFirstChild("leaderstats")
-        if not leaderstats then return 0 end
-        local cash = leaderstats:FindFirstChild("Cash")
-        if not cash then return 0 end
-        return tonumber(cash.Value) or 0
-    end
-
-    -- Search container for a field by name (case-insensitive) and return its readable value
-    local function findFieldValue(container, nameCandidates)
-        if not container then return nil end
-        local lowerCandidates = {}
-        for _, n in ipairs(nameCandidates) do lowerCandidates[#lowerCandidates+1] = string.lower(n) end
-        for _, child in ipairs(container:GetChildren()) do
-            local lname = string.lower(child.Name or "")
-            for _, cand in ipairs(lowerCandidates) do
-                if lname == cand or lname:find(cand) then
-                    local v = readTextOrValue(child)
-                    if v and v ~= "" then return v end
-                end
-            end
-        end
-        for _, desc in ipairs(container:GetDescendants()) do
-            local lname = string.lower(desc.Name or "")
-            for _, cand in ipairs(lowerCandidates) do
-                if lname == cand or lname:find(cand) then
-                    local v = readTextOrValue(desc)
-                    if v and v ~= "" then return v end
-                end
-            end
-        end
-        for _, child in ipairs(container:GetChildren()) do
-            local v = readTextOrValue(child)
-            if v and v ~= "" then return v end
-        end
-        for _, desc in ipairs(container:GetDescendants()) do
-            local v = readTextOrValue(desc)
-            if v and v ~= "" then return v end
-        end
-        return nil
-    end
-
-    -- Scans workspace for all children that contain an Eggtag and returns a table of info
-    local function getAllSpawnedEggsInfo()
-        local results = {}
-        for _, child in pairs(workspace:GetChildren()) do
-            if child and child:FindFirstChild("Eggtag") then
-                local tag = child:FindFirstChild("Eggtag")
-                if tag and tag:FindFirstChild("Container") then
-                    local container = tag.Container
-                    local priceStr = findFieldValue(container, {"Price", "price", "Cost", "cost", "Amount"}) or "N/A"
-                    local priceNum = parsePriceToNumber(priceStr) or 0
-                    local rarity = findFieldValue(container, {"Rarity", "rarity", "Tier", "tier"}) or "N/A"
-                    local variety = findFieldValue(container, {"Variety", "variety", "Type", "type", "Mutation", "mutation"}) or "N/A"
-                    local eggName = tostring(child.Name or "Unknown")
-                    table.insert(results, {
-                        Name = eggName,
-                        Price = priceStr,
-                        PriceNum = priceNum,
-                        Rarity = rarity,
-                        Variety = variety,
-                        Container = container
-                    })
-                end
-            end
-        end
-        return results
-    end
-
-    -- Formats a list of egg infos into a string for the paragraph
-    local function formatEggsForDisplay(eggs)
-        if not eggs or #eggs == 0 then return "No egg detected." end
-        local lines = {}
-        for i, e in ipairs(eggs) do
-            local line = string.format("%d) Name: %s | Price: %s | Rarity: %s | Variety: %s", i, tostring(e.Name), tostring(e.Price), tostring(e.Rarity), tostring(e.Variety))
-            table.insert(lines, line)
-        end
-        return table.concat(lines, "\n")
-    end
-
-    -- Updater loop (always running) to refresh the status paragraph
-    spawn(function()
-        while true do
-            local ok, eggs = pcall(function() return getAllSpawnedEggsInfo() end)
-            if ok and eggs and #eggs > 0 then
-                local content = formatEggsForDisplay(eggs)
-                pcall(function() StatusParagraph:Set({Title = "Egg Status", Content = content}) end)
-            else
-                pcall(function() StatusParagraph:Set({Title = "Egg Status", Content = "No egg detected."}) end)
-            end
-            task.wait(math.max(0.5, pollInterval))
+    pcall(function()
+        local init = (RaritiesDropdown and RaritiesDropdown.CurrentOption) or copyList(RARITY_OPTIONS)
+        if type(init) == "table" then
+            selectedRarities = {}
+            for _, s in ipairs(init) do if type(s) == "string" then selectedRarities[string.lower(s)] = true end end
         end
     end)
 
-    -- Remote references (cached)
-    local function getRemote(name)
-        local ok, rem = pcall(function()
-            return Rep:WaitForChild("Modules"):WaitForChild("Internals"):WaitForChild("Skeleton"):WaitForChild("Conduit"):WaitForChild("Instances"):WaitForChild(name)
-        end)
-        if ok then return rem end
-        return nil
-    end
-    local requestEggRemote = getRemote("_requestEgg")
-    local purchaseEggRemote = getRemote("_purchaseEgg")
+    local VarietiesDropdown = StatusTab:CreateDropdown({
+        Name = "Varieties",
+        Options = VARIETY_OPTIONS,
+        CurrentOption = copyList(VARIETY_OPTIONS),
+        MultipleOptions = true,
+        Flag = "VarietiesFilter",
+        Callback = function(selection)
+            selectedVarieties = {}
+            if type(selection) == "table" then
+                for _, s in ipairs(selection) do
+                    if type(s) == "string" then selectedVarieties[string.lower(s)] = true end
+                end
+            elseif type(selection) == "string" then
+                selectedVarieties[string.lower(selection)] = true
+            end
+        end,
+    })
 
-    -- Wait until no egg present (poll)
-    local function waitUntilNoEgg(timeout)
-        local start = tick()
-        while (tick() - start) < (timeout or 8) do
-            local ok, eggs = pcall(function() return getAllSpawnedEggsInfo() end)
-            if ok and (not eggs or #eggs == 0) then return true end
-            task.wait(pollInterval)
+    pcall(function()
+        local init = (VarietiesDropdown and VarietiesDropdown.CurrentOption) or copyList(VARIETY_OPTIONS)
+        if type(init) == "table" then
+            selectedVarieties = {}
+            for _, s in ipairs(init) do if type(s) == "string" then selectedVarieties[string.lower(s)] = true end end
         end
-        return false
+    end)
+
+    local SpeedSlider = StatusTab:CreateSlider({
+        Name = "Spawn Interval (seconds)",
+        Range = {0.3, 1.0},
+        Increment = 0.05,
+        Suffix = "s",
+        CurrentValue = spawnInterval,
+        Flag = "SpawnInterval",
+        Callback = function(value)
+            applySpeed(value)
+        end,
+    })
+
+    -- Skip-if-too-expensive toggle
+    local skipIfTooExpensive = false
+    StatusTab:CreateToggle({
+        Name = "Skip if too expensive",
+        CurrentValue = false,
+        Flag = "SkipIfTooExpensive",
+        Callback = function(val)
+            skipIfTooExpensive = val and true or false
+        end,
+    })
+end
+
+-- Status paragraph updater
+spawn(function()
+    while true do
+        local ok, eggs = pcall(function() return getAllSpawnedEggsInfo() end)
+        if ok and eggs and #eggs > 0 then
+            local lines = {}
+            for i, e in ipairs(eggs) do
+                lines[#lines+1] = string.format("%d) Name: %s | Price: %s | Rarity: %s | Variety: %s", i, tostring(e.Name), tostring(e.Price), tostring(e.Rarity), tostring(e.Variety))
+            end
+            pcall(function() StatusParagraph:Set({Title = "Egg Status", Content = table.concat(lines, "\n")}) end)
+        else
+            pcall(function() StatusParagraph:Set({Title = "Egg Status", Content = "No egg detected."}) end)
+        end
+        task.wait(math.max(0.5, pollInterval))
     end
+end)
 
-    -- Attempt to purchase the provided egg info (safe pcall).
-    -- Returns true only if the egg disappears (indicating a successful purchase).
-    local function attemptPurchaseFromInfo(eggInfo, waitForDisappear)
-        if not eggInfo or not purchaseEggRemote then return false end
-        local namePart = tostring(eggInfo.Name or "Unknown"):gsub("%s+", "_"):gsub("[^%w_]", "_")
-        local rarityPart = tostring(eggInfo.Rarity or "Basic")
-        local varietyPart = tostring(eggInfo.Variety or "Glitch")
-        local idString = "entity_" .. namePart .. "_egg"
+-- Remote helper
+local function getRemoteSafe(name)
+    local ok, rem = pcall(function()
+        return Rep:WaitForChild("Modules"):WaitForChild("Internals"):WaitForChild("Skeleton"):WaitForChild("Conduit"):WaitForChild("Instances"):WaitForChild(name)
+    end)
+    if ok then return rem end
+    return nil
+end
 
-        local okFire = pcall(function()
-            local args = {
-                {
-                    __raw = true,
-                    data = {
-                        id = idString,
-                        rarity = rarityPart,
-                        variety = varietyPart
-                    }
+local requestEggRemote = getRemoteSafe("_requestEgg")
+local purchaseEggRemote = getRemoteSafe("_purchaseEgg")
+
+-- waitUntilNoEgg
+local function waitUntilNoEgg(timeout)
+    local start = tick()
+    while (tick() - start) < (timeout or 8) do
+        local ok, eggs = pcall(function() return getAllSpawnedEggsInfo() end)
+        if ok and (not eggs or #eggs == 0) then return true end
+        task.wait(pollInterval)
+    end
+    return false
+end
+
+-- attemptPurchaseFromInfo
+local function attemptPurchaseFromInfo(eggInfo, waitForDisappear)
+    if not eggInfo or not purchaseEggRemote then return false end
+    local namePart = tostring(eggInfo.Name or "Unknown"):gsub("%s+", "_"):gsub("[^%w_]", "_")
+    local rarityPart = tostring(eggInfo.Rarity or "Basic")
+    local varietyPart = tostring(eggInfo.Variety or "Glitch")
+    local idString = "entity_" .. namePart .. "_egg"
+
+    local okFire = pcall(function()
+        local args = {
+            {
+                __raw = true,
+                data = {
+                    id = idString,
+                    rarity = rarityPart,
+                    variety = varietyPart
                 }
             }
-            purchaseEggRemote:FireServer(unpack(args))
-        end)
-        if not okFire then return false end
+        }
+        purchaseEggRemote:FireServer(unpack(args))
+    end)
+    if not okFire then return false end
 
-        if not waitForDisappear then return true end
+    if not waitForDisappear then return true end
 
-        local start = tick()
-        while (tick() - start) < 5 do
-            local ok, eggs = pcall(function() return getAllSpawnedEggsInfo() end)
-            if ok then
-                if not eggs or #eggs == 0 then return true end
-                if tostring(eggs[1].Name or "") ~= tostring(eggInfo.Name or "") then return true end
-            end
-            task.wait(pollInterval)
+    local start = tick()
+    while (tick() - start) < 5 do
+        local ok, eggs = pcall(function() return getAllSpawnedEggsInfo() end)
+        if ok then
+            if not eggs or #eggs == 0 then return true end
+            if tostring(eggs[1].Name or "") ~= tostring(eggInfo.Name or "") then return true end
         end
-        return false
+        task.wait(pollInterval)
     end
+    return false
+end
 
-    -- Helper: check if both rarity and variety are allowed (both must match)
-    local function isEggAllowed(eggInfo)
-        if not eggInfo then return false end
-        local r = tostring(eggInfo.Rarity or ""):gsub("^%s*(.-)%s*$", "%1")
-        local v = tostring(eggInfo.Variety or ""):gsub("^%s*(.-)%s*$", "%1")
-        local rl = string.lower(r)
-        local vl = string.lower(v)
-        if next(selectedRarities) == nil or next(selectedVarieties) == nil then return false end
-        return selectedRarities[rl] == true and selectedVarieties[vl] == true
-    end
+local function isEggAllowed(eggInfo)
+    if not eggInfo then return false end
+    local r = tostring(eggInfo.Rarity or ""):gsub("^%s*(.-)%s*$", "%1")
+    local v = tostring(eggInfo.Variety or ""):gsub("^%s*(.-)%s*$", "%1")
+    local rl = string.lower(r)
+    local vl = string.lower(v)
+    if next(selectedRarities) == nil or next(selectedVarieties) == nil then return false end
+    return selectedRarities[rl] == true and selectedVarieties[vl] == true
+end
 
-    -- State & timing controls
-    local autoEnabled = false
-    local autoThread = nil
-    local replacing = false
-    local lastRequestTime = 0
+-- Replacement logic (controlled)
+local replacing = false
+local lastRequestTime = 0
 
-    -- Aggressive replace but controlled by spawnInterval and attemptDelay
-    local function aggressiveReplaceUntilAllowed(currentEgg)
-        replacing = true
-        local startName = tostring(currentEgg.Name or "")
-        local SAFETY_MAX_ATTEMPTS = math.max(6, math.floor(30 * (1.0 / spawnInterval))) -- scale attempts with speed
-        for attempt = 1, SAFETY_MAX_ATTEMPTS do
-            if not autoEnabled then break end
-
-            if tick() - lastRequestTime >= requestCooldown then
-                if requestEggRemote then
-                    pcall(function()
-                        local args = {
-                            {
-                                __raw = true,
-                                data = {}
-                            }
+local function aggressiveReplaceUntilAllowed(currentEgg)
+    replacing = true
+    local startName = tostring(currentEgg.Name or "")
+    local SAFETY_MAX_ATTEMPTS = math.max(6, math.floor(30 * (1.0 / spawnInterval)))
+    for attempt = 1, SAFETY_MAX_ATTEMPTS do
+        if tick() - lastRequestTime >= requestCooldown then
+            if requestEggRemote then
+                pcall(function()
+                    local args = {
+                        {
+                            __raw = true,
+                            data = {}
                         }
-                        requestEggRemote:FireServer(unpack(args))
-                    end)
+                    }
+                    requestEggRemote:FireServer(unpack(args))
+                end)
+            end
+            lastRequestTime = tick()
+        end
+
+        task.wait(attemptDelay)
+
+        local ok, eggsAfter = pcall(function() return getAllSpawnedEggsInfo() end)
+        if ok and eggsAfter and #eggsAfter > 0 then
+            local newEgg = eggsAfter[1]
+            local newName = tostring(newEgg.Name or "")
+            if newName ~= startName then
+                if isEggAllowed(newEgg) then
+                    replacing = false
+                    return newEgg
+                else
+                    startName = newName
                 end
+            end
+        else
+            task.wait(math.min(0.25, attemptDelay))
+        end
+    end
+    replacing = false
+    return nil
+end
+
+-- Core auto spawn/buy loop (spawnInterval controls pace)
+local autoEnabled = false
+local autoThread = nil
+
+local function autoSpawnBuyLoop()
+    while autoEnabled do
+        local ok, eggsNow = pcall(function() return getAllSpawnedEggsInfo() end)
+        if not ok then eggsNow = {} end
+        local current = (eggsNow and #eggsNow > 0) and eggsNow[1] or nil
+
+        if current then
+            local cost = tonumber(current.PriceNum) or 0
+            local cash = getPlayerCash()
+
+            if isEggAllowed(current) then
+                if skipIfTooExpensive and cost > 0 and cash < cost then
+                    -- skip expensive allowed egg by requesting new spawn (respect cooldown)
+                    if tick() - lastRequestTime >= requestCooldown and requestEggRemote then
+                        pcall(function()
+                            local args = {
+                                {
+                                    __raw = true,
+                                    data = {}
+                                }
+                            }
+                            requestEggRemote:FireServer(unpack(args))
+                        end)
+                        lastRequestTime = tick()
+                    end
+                    -- wait spawnInterval before next request
+                    local waited = 0
+                    while autoEnabled and waited < spawnInterval do
+                        task.wait(math.min(0.12, spawnInterval))
+                        waited = waited + math.min(0.12, spawnInterval)
+                    end
+                else
+                    -- normal allowed-egg flow
+                    if cost > 0 and cash >= cost then
+                        local purchased = false
+                        for attempt = 1, 3 do
+                            if not autoEnabled then break end
+                            purchased = attemptPurchaseFromInfo(current, true)
+                            if purchased then break end
+                            task.wait(purchaseRetryDelay)
+                        end
+                        if purchased then
+                            waitUntilNoEgg(10)
+                            task.wait(0.25)
+                        else
+                            waitUntilNoEgg(12)
+                            task.wait(0.25)
+                        end
+                    else
+                        -- can't afford and skip toggle is off: wait until enough or egg disappears
+                        local affordTimeout = 180
+                        local start = tick()
+                        while autoEnabled and (tick() - start) < affordTimeout do
+                            local newCash = getPlayerCash()
+                            local ok2, eggsCheck = pcall(function() return getAllSpawnedEggsInfo() end)
+                            if ok2 and (not eggsCheck or #eggsCheck == 0) then break end
+                            if newCash >= cost then
+                                local purchased = attemptPurchaseFromInfo(current, true)
+                                if purchased then waitUntilNoEgg(10) end
+                                break
+                            end
+                            task.wait(math.max(0.25, pollInterval))
+                        end
+                        task.wait(0.25)
+                    end
+                end
+            else
+                -- current not allowed
+                if skipIfTooExpensive and cost > 0 and getPlayerCash() < cost then
+                    -- request new egg regardless of rarity/variety
+                    if tick() - lastRequestTime >= requestCooldown and requestEggRemote then
+                        pcall(function()
+                            local args = {
+                                {
+                                    __raw = true,
+                                    data = {}
+                                }
+                            }
+                            requestEggRemote:FireServer(unpack(args))
+                        end)
+                        lastRequestTime = tick()
+                    end
+                    local waited = 0
+                    while autoEnabled and waited < spawnInterval do
+                        task.wait(math.min(0.12, spawnInterval))
+                        waited = waited + math.min(0.12, spawnInterval)
+                    end
+                else
+                    if not replacing then
+                        local allowedEgg = aggressiveReplaceUntilAllowed(current)
+                        if allowedEgg then
+                            local cost2 = tonumber(allowedEgg.PriceNum) or 0
+                            local cash2 = getPlayerCash()
+                            if cost2 > 0 and cash2 >= cost2 then
+                                local purchased = attemptPurchaseFromInfo(allowedEgg, true)
+                                if purchased then waitUntilNoEgg(10) end
+                            else
+                                if skipIfTooExpensive and cost2 > 0 and cash2 < cost2 then
+                                    if tick() - lastRequestTime >= requestCooldown and requestEggRemote then
+                                        pcall(function()
+                                            local args = {
+                                                {
+                                                    __raw = true,
+                                                    data = {}
+                                                }
+                                            }
+                                            requestEggRemote:FireServer(unpack(args))
+                                        end)
+                                        lastRequestTime = tick()
+                                    end
+                                    task.wait(spawnInterval)
+                                else
+                                    local start = tick()
+                                    local affordTimeout = 180
+                                    while autoEnabled and (tick() - start) < affordTimeout do
+                                        local newCash = getPlayerCash()
+                                        local ok2, eggsCheck = pcall(function() return getAllSpawnedEggsInfo() end)
+                                        if ok2 and (not eggsCheck or #eggsCheck == 0) then break end
+                                        if newCash >= cost2 then
+                                            local purchased = attemptPurchaseFromInfo(allowedEgg, true)
+                                            if purchased then waitUntilNoEgg(10) end
+                                            break
+                                        end
+                                        task.wait(math.max(0.25, pollInterval))
+                                    end
+                                end
+                            end
+                        else
+                            task.wait(math.max(0.6, spawnInterval))
+                        end
+                    else
+                        task.wait(math.min(0.18, spawnInterval))
+                    end
+                end
+            end
+        else
+            -- no egg present: request a new spawn (respect cooldown)
+            if tick() - lastRequestTime >= requestCooldown and requestEggRemote then
+                pcall(function()
+                    local args = {
+                        {
+                            __raw = true,
+                            data = {}
+                        }
+                    }
+                    requestEggRemote:FireServer(unpack(args))
+                end)
                 lastRequestTime = tick()
             end
 
-            task.wait(attemptDelay)
-
-            local ok, eggsAfter = pcall(function() return getAllSpawnedEggsInfo() end)
-            if ok and eggsAfter and #eggsAfter > 0 then
-                local newEgg = eggsAfter[1]
-                local newName = tostring(newEgg.Name or "")
-                if newName ~= startName then
-                    if isEggAllowed(newEgg) then
-                        replacing = false
-                        return newEgg
-                    else
-                        startName = newName
-                    end
-                end
-            else
-                task.wait(math.min(0.25, attemptDelay))
+            -- wait spawnInterval seconds before next request
+            local waited = 0
+            while autoEnabled and waited < spawnInterval do
+                task.wait(math.min(0.12, spawnInterval))
+                waited = waited + math.min(0.12, spawnInterval)
             end
         end
-        replacing = false
+
+        task.wait(math.max(0.05, pollInterval * 0.5))
+    end
+end
+
+-- Create Auto Spawn+Buy toggle
+StatusTab:CreateToggle({
+    Name = "Auto Spawn+Buy Eggs",
+    CurrentValue = false,
+    Flag = "AutoSpawnBuyEggs",
+    Callback = function(val)
+        autoEnabled = val
+        if autoEnabled then
+            if not autoThread or coroutine.status(autoThread) ~= "running" then
+                autoThread = spawn(function() autoSpawnBuyLoop() end)
+            end
+        end
+    end
+})
+
+-- Misc tab: Auto Sell and Auto Rebirth
+local MiscTab = Window:CreateTab("Misc", 4483362458)
+local MiscSection = MiscTab:CreateSection("Automation")
+
+-- Remotes for misc actions
+local collectRemote = getRemoteSafe("_collectEarnings")
+local sellRemote = getRemoteSafe("_sellStack")
+local rebirthRemote = getRemoteSafe("doRebirth")
+
+-- Auto Sell
+local autoSellEnabled = false
+local autoSellThread = nil
+
+local function equipBoxStack()
+    local pl = Players.LocalPlayer
+    if not pl then return false end
+
+    local function findTool(container)
+        if not container then return nil end
+        for _, item in ipairs(container:GetChildren()) do
+            if item:IsA("Tool") then
+                local name = tostring(item.Name or "")
+                if name:lower():find("box stack") then
+                    return item
+                end
+            end
+        end
         return nil
     end
 
-    -- Core loop: spawn at roughly 1/spawnInterval requests per second (user-controlled)
-    local function autoSpawnBuyLoop()
-        while autoEnabled do
-            local ok, eggsNow = pcall(function() return getAllSpawnedEggsInfo() end)
-            if not ok then eggsNow = {} end
-            local current = (eggsNow and #eggsNow > 0) and eggsNow[1] or nil
+    local backpack = pl:FindFirstChild("Backpack")
+    local char = pl.Character
+    local tool = findTool(backpack) or findTool(char)
+    if not tool then return false end
 
-            if current then
-                local cost = tonumber(current.PriceNum) or 0
-                local cash = getPlayerCash()
-
-                -- If current egg is allowed
-                if isEggAllowed(current) then
-                    -- If skipIfTooExpensive is ON and we cannot afford, request a new egg immediately (respect cooldown)
-                    if skipIfTooExpensive and cost > 0 and cash < cost then
-                        if tick() - lastRequestTime >= requestCooldown and requestEggRemote then
-                            pcall(function()
-                                local args = {
-                                    {
-                                        __raw = true,
-                                        data = {}
-                                    }
-                                }
-                                requestEggRemote:FireServer(unpack(args))
-                            end)
-                            lastRequestTime = tick()
-                        end
-                        -- wait spawnInterval before next request to maintain ~60/min pace
-                        local waited = 0
-                        while autoEnabled and waited < spawnInterval do
-                            task.wait(math.min(0.12, spawnInterval))
-                            waited = waited + math.min(0.12, spawnInterval)
-                        end
-                        -- continue loop to re-evaluate
-                    else
-                        -- Normal allowed-egg flow: attempt purchase if affordable, otherwise wait (unless skip toggle handled above)
-                        if cost > 0 and cash >= cost then
-                            local purchased = false
-                            for attempt = 1, 3 do
-                                if not autoEnabled then break end
-                                purchased = attemptPurchaseFromInfo(current, true)
-                                if purchased then break end
-                                task.wait(purchaseRetryDelay)
-                            end
-                            if purchased then
-                                waitUntilNoEgg(10)
-                                task.wait(0.25)
-                            else
-                                waitUntilNoEgg(12)
-                                task.wait(0.25)
-                            end
-                        else
-                            -- Can't afford and skip toggle is OFF: wait until we have enough or egg disappears
-                            local affordTimeout = 180
-                            local start = tick()
-                            while autoEnabled and (tick() - start) < affordTimeout do
-                                local newCash = getPlayerCash()
-                                local ok2, eggsCheck = pcall(function() return getAllSpawnedEggsInfo() end)
-                                if ok2 and (not eggsCheck or #eggsCheck == 0) then break end
-                                if newCash >= cost then
-                                    local purchased = attemptPurchaseFromInfo(current, true)
-                                    if purchased then waitUntilNoEgg(10) end
-                                    break
-                                end
-                                task.wait(math.max(0.25, pollInterval))
-                            end
-                            task.wait(0.25)
-                        end
-                    end
-                else
-                    -- Current egg is NOT allowed
-                    -- If skipIfTooExpensive is ON and we cannot afford this egg, request a new egg regardless of rarity/variety
-                    if skipIfTooExpensive and cost > 0 and getPlayerCash() < cost then
-                        if tick() - lastRequestTime >= requestCooldown and requestEggRemote then
-                            pcall(function()
-                                local args = {
-                                    {
-                                        __raw = true,
-                                        data = {}
-                                    }
-                                }
-                                requestEggRemote:FireServer(unpack(args))
-                            end)
-                            lastRequestTime = tick()
-                        end
-                        -- wait spawnInterval before next request
-                        local waited = 0
-                        while autoEnabled and waited < spawnInterval do
-                            task.wait(math.min(0.12, spawnInterval))
-                            waited = waited + math.min(0.12, spawnInterval)
-                        end
-                    else
-                        -- Otherwise, try controlled aggressive replacement to find an allowed egg
-                        if not replacing then
-                            local allowedEgg = aggressiveReplaceUntilAllowed(current)
-                            if allowedEgg then
-                                local cost2 = tonumber(allowedEgg.PriceNum) or 0
-                                local cash2 = getPlayerCash()
-                                if cost2 > 0 and cash2 >= cost2 then
-                                    local purchased = attemptPurchaseFromInfo(allowedEgg, true)
-                                    if purchased then waitUntilNoEgg(10) end
-                                else
-                                    -- allowed but unaffordable: if skip toggle ON, request new eggs; else wait for money
-                                    if skipIfTooExpensive and cost2 > 0 and cash2 < cost2 then
-                                        if tick() - lastRequestTime >= requestCooldown and requestEggRemote then
-                                            pcall(function()
-                                                local args = {
-                                                    {
-                                                        __raw = true,
-                                                        data = {}
-                                                    }
-                                                }
-                                                requestEggRemote:FireServer(unpack(args))
-                                            end)
-                                            lastRequestTime = tick()
-                                        end
-                                        task.wait(spawnInterval)
-                                    else
-                                        local start = tick()
-                                        local affordTimeout = 180
-                                        while autoEnabled and (tick() - start) < affordTimeout do
-                                            local newCash = getPlayerCash()
-                                            local ok2, eggsCheck = pcall(function() return getAllSpawnedEggsInfo() end)
-                                            if ok2 and (not eggsCheck or #eggsCheck == 0) then break end
-                                            if newCash >= cost2 then
-                                                local purchased = attemptPurchaseFromInfo(allowedEgg, true)
-                                                if purchased then waitUntilNoEgg(10) end
-                                                break
-                                            end
-                                            task.wait(math.max(0.25, pollInterval))
-                                        end
-                                    end
-                                end
-                            else
-                                -- No allowed egg found within safety cap; back off a bit
-                                task.wait(math.max(0.6, spawnInterval))
-                            end
-                        else
-                            -- replacing in progress: give it a moment
-                            task.wait(math.min(0.18, spawnInterval))
-                        end
-                    end
-                end
-            else
-                -- No egg present: request a new spawn (respect spawnInterval and cooldown)
-                if tick() - lastRequestTime >= requestCooldown and requestEggRemote then
-                    pcall(function()
-                        local args = {
-                            {
-                                __raw = true,
-                                data = {}
-                            }
-                        }
-                        requestEggRemote:FireServer(unpack(args))
-                    end)
-                    lastRequestTime = tick()
-                end
-
-                -- Wait spawnInterval seconds (user-controlled) before next request
-                local waited = 0
-                while autoEnabled and waited < spawnInterval do
-                    task.wait(math.min(0.12, spawnInterval))
-                    waited = waited + math.min(0.12, spawnInterval)
-                end
-            end
-
-            task.wait(math.max(0.05, pollInterval * 0.5))
+    local ok = pcall(function()
+        if tool.Parent ~= char and char then
+            tool.Parent = char
         end
+        if type(tool.Activate) == "function" then
+            pcall(function() tool:Activate() end)
+        end
+    end)
+    return ok
+end
+
+local function autoSellCycle()
+    if collectRemote then
+        pcall(function()
+            local args = {
+                {
+                    __raw = true,
+                    data = {}
+                }
+            }
+            collectRemote:FireServer(unpack(args))
+        end)
     end
 
-    -- Create the Rayfield toggle
-    StatusTab:CreateToggle({
-        Name = "Auto Spawn+Buy Eggs",
-        CurrentValue = false,
-        Flag = "AutoSpawnBuyEggs",
-        Callback = function(val)
-            autoEnabled = val
-            if autoEnabled then
-                if not autoThread or coroutine.status(autoThread) ~= "running" then
-                    autoThread = spawn(function()
-                        autoSpawnBuyLoop()
-                    end)
-                end
+    task.wait(0.25)
+
+    local equipped = equipBoxStack()
+    task.wait(0.25)
+
+    if sellRemote and equipped then
+        pcall(function()
+            local args = {
+                {
+                    __raw = true,
+                    data = {}
+                }
+            }
+            sellRemote:FireServer(unpack(args))
+        end)
+    end
+end
+
+local function autoSellLoop()
+    while autoSellEnabled do
+        pcall(autoSellCycle)
+        local waited = 0
+        local interval = 30
+        while autoSellEnabled and waited < interval do
+            task.wait(0.5)
+            waited = waited + 0.5
+        end
+    end
+end
+
+MiscTab:CreateToggle({
+    Name = "Auto Sell",
+    CurrentValue = false,
+    Flag = "AutoSellToggle",
+    Callback = function(val)
+        autoSellEnabled = val and true or false
+        if autoSellEnabled then
+            if not autoSellThread or coroutine.status(autoSellThread) ~= "running" then
+                autoSellThread = spawn(function() autoSellLoop() end)
             end
         end
-    })
+    end,
+})
+
+-- Auto Rebirth
+local autoRebirthEnabled = false
+local autoRebirthThread = nil
+local REBIRTH_INTERVAL = 10 * 60 -- 10 minutes
+
+local function doRebirthOnce()
+    if not rebirthRemote then
+        rebirthRemote = getRemoteSafe("doRebirth")
+        if not rebirthRemote then return false end
+    end
+    local ok = pcall(function()
+        local args = {
+            {
+                __raw = true,
+                data = {}
+            }
+        }
+        rebirthRemote:FireServer(unpack(args))
+    end)
+    return ok
 end
-Rayfield:LoadConfiguration()
+
+local function autoRebirthLoop()
+    while autoRebirthEnabled do
+        pcall(doRebirthOnce)
+        local waited = 0
+        while autoRebirthEnabled and waited < REBIRTH_INTERVAL do
+            task.wait(1)
+            waited = waited + 1
+        end
+    end
+end
+
+MiscTab:CreateToggle({
+    Name = "Auto Rebirth",
+    CurrentValue = false,
+    Flag = "AutoRebirthToggle",
+    Callback = function(val)
+        autoRebirthEnabled = val and true or false
+        if autoRebirthEnabled then
+            if not autoRebirthThread or coroutine.status(autoRebirthThread) ~= "running" then
+                autoRebirthThread = spawn(function() autoRebirthLoop() end)
+            end
+        end
+    end,
+})
+
+-- End of script
