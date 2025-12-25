@@ -1,12 +1,11 @@
+-- Replace the previous dropdown block with this exact snippet
 -- Rarity and Variety options
 local RARITY_OPTIONS = {"Normal", "Rare", "Epic", "Legendary", "Mythic", "Secret"}
 local VARIETY_OPTIONS = {"Normal", "Golden", "Diamond", "Glitch", "Galaxy", "????"}
 
--- Default: all selected
+-- Default selected sets (will be populated from CurrentOption)
 local selectedRarities = {}
 local selectedVarieties = {}
-for _, v in ipairs(RARITY_OPTIONS) do selectedRarities[string.lower(v)] = true end
-for _, v in ipairs(VARIETY_OPTIONS) do selectedVarieties[string.lower(v)] = true end
 
 -- Helper to copy a list (Rayfield expects a table of strings for CurrentOption)
 local function copyList(tbl)
@@ -15,41 +14,72 @@ local function copyList(tbl)
     return out
 end
 
--- Corrected Rarities dropdown (multi-select)
-local RaritiesDropdown = StatusTab:CreateDropdown({
-    Name = "Rarities",
-    Options = RARITY_OPTIONS,
-    CurrentOption = copyList(RARITY_OPTIONS), -- table of selected strings
-    MultipleOptions = true,                   -- enable multi-select
-    Flag = "RaritiesFilter",
-    Callback = function(selection)
-        -- selection is a table of selected strings
-        selectedRarities = {}
-        if type(selection) == "table" then
-            for _, s in ipairs(selection) do
-                if type(s) == "string" then
-                    selectedRarities[string.lower(s)] = true
+-- Ensure StatusTab exists before creating UI elements
+if not StatusTab or type(StatusTab.CreateDropdown) ~= "function" then
+    warn("StatusTab or CreateDropdown not available; dropdowns not created.")
+else
+    -- Create Rarities dropdown (multi-select)
+    local RaritiesDropdown = StatusTab:CreateDropdown({
+        Name = "Rarities",
+        Options = RARITY_OPTIONS,
+        CurrentOption = copyList(RARITY_OPTIONS), -- all selected by default
+        MultipleOptions = true,                   -- enable multi-select
+        Flag = "RaritiesFilter",
+        Callback = function(selection)
+            -- selection is a table of selected strings
+            selectedRarities = {}
+            if type(selection) == "table" then
+                for _, s in ipairs(selection) do
+                    if type(s) == "string" then
+                        selectedRarities[string.lower(s)] = true
+                    end
                 end
+            elseif type(selection) == "string" then
+                selectedRarities[string.lower(selection)] = true
             end
-        end
-    end,
-})
+        end,
+    })
 
--- Corrected Varieties dropdown (multi-select)
-local VarietiesDropdown = StatusTab:CreateDropdown({
-    Name = "Varieties",
-    Options = VARIETY_OPTIONS,
-    CurrentOption = copyList(VARIETY_OPTIONS),
-    MultipleOptions = true,
-    Flag = "VarietiesFilter",
-    Callback = function(selection)
-        selectedVarieties = {}
-        if type(selection) == "table" then
-            for _, s in ipairs(selection) do
-                if type(s) == "string" then
-                    selectedVarieties[string.lower(s)] = true
-                end
+    -- Initialize selectedRarities from CurrentOption (in case Rayfield saved config)
+    do
+        local init = RaritiesDropdown and RaritiesDropdown.CurrentOption or copyList(RARITY_OPTIONS)
+        if type(init) == "table" then
+            selectedRarities = {}
+            for _, s in ipairs(init) do
+                if type(s) == "string" then selectedRarities[string.lower(s)] = true end
             end
         end
-    end,
-})
+    end
+
+    -- Create Varieties dropdown (multi-select)
+    local VarietiesDropdown = StatusTab:CreateDropdown({
+        Name = "Varieties",
+        Options = VARIETY_OPTIONS,
+        CurrentOption = copyList(VARIETY_OPTIONS),
+        MultipleOptions = true,
+        Flag = "VarietiesFilter",
+        Callback = function(selection)
+            selectedVarieties = {}
+            if type(selection) == "table" then
+                for _, s in ipairs(selection) do
+                    if type(s) == "string" then
+                        selectedVarieties[string.lower(s)] = true
+                    end
+                end
+            elseif type(selection) == "string" then
+                selectedVarieties[string.lower(selection)] = true
+            end
+        end,
+    })
+
+    -- Initialize selectedVarieties from CurrentOption (in case Rayfield saved config)
+    do
+        local init = VarietiesDropdown and VarietiesDropdown.CurrentOption or copyList(VARIETY_OPTIONS)
+        if type(init) == "table" then
+            selectedVarieties = {}
+            for _, s in ipairs(init) do
+                if type(s) == "string" then selectedVarieties[string.lower(s)] = true end
+            end
+        end
+    end
+end
