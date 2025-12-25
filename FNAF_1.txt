@@ -142,10 +142,12 @@ do
     local pollInterval = 0.18          -- polling interval for status checks
     local purchaseRetryDelay = 0.6     -- delay between purchase retries
 
+    -- Skip-if-too-expensive toggle (default off)
+    local skipIfTooExpensive = false
+
     -- Apply slider value to all timing variables (keeps relationships sensible)
     local function applySpeed(s)
         spawnInterval = tonumber(s) or 1.0
-        -- keep a minimum cooldown so we don't spam too fast
         requestCooldown = math.max(0.12, spawnInterval * 0.22)
         attemptDelay = math.max(0.12, spawnInterval)
         pollInterval = math.max(0.08, spawnInterval * 0.18)
@@ -168,7 +170,7 @@ do
         return false
     end
 
-    -- Create dropdowns and slider only when API is ready
+    -- Create dropdowns, slider and the new toggle only when API is ready
     if not waitForStatusTab(StatusTab, 6) then
         warn("StatusTab or CreateDropdown not available; dropdowns not created.")
     else
@@ -244,6 +246,16 @@ do
             Flag = "SpawnInterval",
             Callback = function(value)
                 applySpeed(value)
+            end,
+        })
+
+        -- New toggle: Skip if too expensive
+        StatusTab:CreateToggle({
+            Name = "Skip if too expensive",
+            CurrentValue = false,
+            Flag = "SkipIfTooExpensive",
+            Callback = function(val)
+                skipIfTooExpensive = val and true or false
             end,
         })
     end
@@ -508,60 +520,155 @@ do
             if not ok then eggsNow = {} end
             local current = (eggsNow and #eggsNow > 0) and eggsNow[1] or nil
 
-            if current and isEggAllowed(current) then
-                -- Allowed egg present: check affordability
-                local cash = getPlayerCash()
+            if current then
                 local cost = tonumber(current.PriceNum) or 0
+                local cash = getPlayerCash()
 
-                if cost > 0 and cash >= cost then
-                    -- Attempt purchase with retries
-                    local purchased = false
-                    for attempt = 1, 3 do
-                        if not autoEnabled then break end
-                        purchased = attemptPurchaseFromInfo(current, true)
-                        if purchased then break end
-                        task.wait(purchaseRetryDelay)
-                    end
-
-                    if purchased then
-                        waitUntilNoEgg(10)
-                        task.wait(0.25)
+                -- If current egg is allowed
+                if isEggAllowed(current) then
+                    -- If skipIfTooExpensive is ON and we cannot afford, request a new egg immediately (respect cooldown)
+                    if skipIfTooExpensive and cost > 0 and cash < cost then
+                        if tick() - lastRequestTime >= requestCooldown and requestEggRemote then
+                            pcall(function()
+                                local args = {
+                                    {
+                                        __raw = true,
+                                        data = {}
+                                    }
+                                }
+                                requestEggRemote:FireServer(unpack(args))
+                            end)
+                            lastRequestTime = tick()
+                        end
+                        -- wait spawnInterval before next request to maintain ~60/min pace
+                        local waited = 0
+                        while autoEnabled and waited < spawnInterval do
+                            task.wait(math.min(0.12, spawnInterval))
+                            waited = waited + math.min(0.12, spawnInterval)
+                        end
+                        -- continue loop to re-evaluate
                     else
-                        waitUntilNoEgg(12)
-                        task.wait(0.25)
+                        -- Normal allowed-egg flow: attempt purchase if affordable, otherwise wait (unless skip toggle handled above)
+                        if cost > 0 and cash >= cost then
+                            local purchased = false
+                            for attempt = 1, 3 do
+                                if not autoEnabled then break end
+                                purchased = attemptPurchaseFromInfo(current, true)
+                                if purchased then break end
+                                task.wait(purchaseRetryDelay)
+                            end
+                            if purchased then
+                                waitUntilNoEgg(10)
+                                task.wait(0.25)
+                            else
+                                waitUntilNoEgg(12)
+                                task.wait(0.25)
+                            end
+                        else
+                            -- Can't afford and skip toggle is OFF: wait until we have enough or egg disappears
+                            local affordTimeout = 180
+                            local start = tick()
+                            while autoEnabled and (tick() - start) < affordTimeout do
+                                local newCash = getPlayerCash()
+                                local ok2, eggsCheck = pcall(function() return getAllSpawnedEggsInfo() end)
+                                if ok2 and (not eggsCheck or #eggsCheck == 0) then break end
+                                if newCash >= cost then
+                                    local purchased = attemptPurchaseFromInfo(current, true)
+                                    if purchased then waitUntilNoEgg(10) end
+                                    break
+                                end
+                                task.wait(math.max(0.25, pollInterval))
+                            end
+                            task.wait(0.25)
+                        end
                     end
                 else
-                    -- Can't afford: wait until we have enough or egg disappears
-                    local affordTimeout = 180
-                    local start = tick()
-                    while autoEnabled and (tick() - start) < affordTimeout do
-                        local newCash = getPlayerCash()
-                        local ok2, eggsCheck = pcall(function() return getAllSpawnedEggsInfo() end)
-                        if ok2 and (not eggsCheck or #eggsCheck == 0) then break end
-                        if newCash >= cost then
-                            local purchased = attemptPurchaseFromInfo(current, true)
-                            if purchased then waitUntilNoEgg(10) end
-                            break
+                    -- Current egg is NOT allowed
+                    -- If skipIfTooExpensive is ON and we cannot afford this egg, request a new egg regardless of rarity/variety
+                    if skipIfTooExpensive and cost > 0 and getPlayerCash() < cost then
+                        if tick() - lastRequestTime >= requestCooldown and requestEggRemote then
+                            pcall(function()
+                                local args = {
+                                    {
+                                        __raw = true,
+                                        data = {}
+                                    }
+                                }
+                                requestEggRemote:FireServer(unpack(args))
+                            end)
+                            lastRequestTime = tick()
                         end
-                        task.wait(math.max(0.25, pollInterval))
+                        -- wait spawnInterval before next request
+                        local waited = 0
+                        while autoEnabled and waited < spawnInterval do
+                            task.wait(math.min(0.12, spawnInterval))
+                            waited = waited + math.min(0.12, spawnInterval)
+                        end
+                    else
+                        -- Otherwise, try controlled aggressive replacement to find an allowed egg
+                        if not replacing then
+                            local allowedEgg = aggressiveReplaceUntilAllowed(current)
+                            if allowedEgg then
+                                local cost2 = tonumber(allowedEgg.PriceNum) or 0
+                                local cash2 = getPlayerCash()
+                                if cost2 > 0 and cash2 >= cost2 then
+                                    local purchased = attemptPurchaseFromInfo(allowedEgg, true)
+                                    if purchased then waitUntilNoEgg(10) end
+                                else
+                                    -- allowed but unaffordable: if skip toggle ON, request new eggs; else wait for money
+                                    if skipIfTooExpensive and cost2 > 0 and cash2 < cost2 then
+                                        if tick() - lastRequestTime >= requestCooldown and requestEggRemote then
+                                            pcall(function()
+                                                local args = {
+                                                    {
+                                                        __raw = true,
+                                                        data = {}
+                                                    }
+                                                }
+                                                requestEggRemote:FireServer(unpack(args))
+                                            end)
+                                            lastRequestTime = tick()
+                                        end
+                                        task.wait(spawnInterval)
+                                    else
+                                        local start = tick()
+                                        local affordTimeout = 180
+                                        while autoEnabled and (tick() - start) < affordTimeout do
+                                            local newCash = getPlayerCash()
+                                            local ok2, eggsCheck = pcall(function() return getAllSpawnedEggsInfo() end)
+                                            if ok2 and (not eggsCheck or #eggsCheck == 0) then break end
+                                            if newCash >= cost2 then
+                                                local purchased = attemptPurchaseFromInfo(allowedEgg, true)
+                                                if purchased then waitUntilNoEgg(10) end
+                                                break
+                                            end
+                                            task.wait(math.max(0.25, pollInterval))
+                                        end
+                                    end
+                                end
+                            else
+                                -- No allowed egg found within safety cap; back off a bit
+                                task.wait(math.max(0.6, spawnInterval))
+                            end
+                        else
+                            -- replacing in progress: give it a moment
+                            task.wait(math.min(0.18, spawnInterval))
+                        end
                     end
-                    task.wait(0.25)
                 end
             else
-                -- No allowed egg present: request a new spawn (respect spawnInterval and cooldown)
-                if not replacing and tick() - lastRequestTime >= requestCooldown then
-                    if requestEggRemote then
-                        pcall(function()
-                            local args = {
-                                {
-                                    __raw = true,
-                                    data = {}
-                                }
+                -- No egg present: request a new spawn (respect spawnInterval and cooldown)
+                if tick() - lastRequestTime >= requestCooldown and requestEggRemote then
+                    pcall(function()
+                        local args = {
+                            {
+                                __raw = true,
+                                data = {}
                             }
-                            requestEggRemote:FireServer(unpack(args))
-                        end)
-                        lastRequestTime = tick()
-                    end
+                        }
+                        requestEggRemote:FireServer(unpack(args))
+                    end)
+                    lastRequestTime = tick()
                 end
 
                 -- Wait spawnInterval seconds (user-controlled) before next request
@@ -569,24 +676,6 @@ do
                 while autoEnabled and waited < spawnInterval do
                     task.wait(math.min(0.12, spawnInterval))
                     waited = waited + math.min(0.12, spawnInterval)
-                end
-
-                -- After waiting, re-scan and if a not-allowed egg is present, try controlled replacement
-                local ok2, eggsAfter = pcall(function() return getAllSpawnedEggsInfo() end)
-                if ok2 and eggsAfter and #eggsAfter > 0 then
-                    local newEgg = eggsAfter[1]
-                    if not isEggAllowed(newEgg) and not replacing then
-                        -- try to replace aggressively but controlled
-                        local allowedEgg = aggressiveReplaceUntilAllowed(newEgg)
-                        if allowedEgg then
-                            local cash = getPlayerCash()
-                            local cost = tonumber(allowedEgg.PriceNum) or 0
-                            if cost > 0 and cash >= cost then
-                                local purchased = attemptPurchaseFromInfo(allowedEgg, true)
-                                if purchased then waitUntilNoEgg(10) end
-                            end
-                        end
-                    end
                 end
             end
 
@@ -611,3 +700,4 @@ do
         end
     })
 end
+Rayfield:LoadConfiguration()
