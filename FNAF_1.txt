@@ -117,6 +117,7 @@ do
 
     -- Filter UI section
     local FilterSection = StatusTab:CreateSection("Filters")
+    -- Rarity and Variety options (RARITY corrected: Basic instead of Normal)
     local RARITY_OPTIONS = {"Basic", "Rare", "Epic", "Legendary", "Mythic", "Secret"}
     local VARIETY_OPTIONS = {"Normal", "Golden", "Diamond", "Glitch", "Galaxy", "????"}
 
