@@ -439,8 +439,9 @@ do
             return selectedRarities[rl] == true and selectedVarieties[vl] == true
         end
 
-        -- Core loop (sped up)
+        -- Core loop (sped up) with controlled replacement retries for disallowed eggs
         local function autoSpawnBuyLoop()
+            ::continue_loop::
             while autoEnabled do
                 -- If an egg exists, evaluate it
                 local ok, eggsNow = pcall(function() return getAllSpawnedEggsInfo() end)
@@ -453,22 +454,65 @@ do
                         end)
                         waitUntilNoEgg(8)
                         task.wait(0.18)
-                        continue
+                        -- continue main loop
+                        goto continue_loop
                     else
-                        -- Not allowed: request a different egg immediately
-                        if requestEggRemote then
-                            pcall(function()
-                                local args = {
-                                    {
-                                        __raw = true,
-                                        data = {}
+                        -- Not allowed: try to replace the egg quickly with controlled retries
+                        local MAX_RETRIES = 6          -- how many times to request a new egg before backing off
+                        local RETRY_DELAY = 0.12       -- wait between retries
+                        local startName = tostring(current.Name or "")
+                        local replaced = false
+
+                        for i = 1, MAX_RETRIES do
+                            if not autoEnabled then break end
+
+                            if requestEggRemote then
+                                pcall(function()
+                                    local args = {
+                                        {
+                                            __raw = true,
+                                            data = {}
+                                        }
                                     }
-                                }
-                                requestEggRemote:FireServer(unpack(args))
-                            end)
+                                    requestEggRemote:FireServer(unpack(args))
+                                end)
+                            end
+
+                            task.wait(RETRY_DELAY)
+
+                            -- re-scan for eggs
+                            local ok2, eggsAfter = pcall(function() return getAllSpawnedEggsInfo() end)
+                            if ok2 and eggsAfter and #eggsAfter > 0 then
+                                local newEgg = eggsAfter[1]
+                                local newName = tostring(newEgg.Name or "")
+                                -- If the egg changed and is allowed, purchase it immediately
+                                if newName ~= startName then
+                                    if isEggAllowed(newEgg) then
+                                        pcall(function() attemptPurchaseFromInfo(newEgg) end)
+                                        waitUntilNoEgg(8)
+                                        replaced = true
+                                        break
+                                    else
+                                        -- egg changed but still not allowed; update startName and continue retries
+                                        startName = newName
+                                    end
+                                else
+                                    -- same egg still present; continue retrying
+                                end
+                            else
+                                -- no egg detected after request; server cleared it — treat as replaced
+                                replaced = true
+                                break
+                            end
                         end
-                        task.wait(0.18)
-                        continue
+
+                        -- If we exhausted retries and still stuck on the same disallowed egg, back off briefly
+                        if not replaced then
+                            task.wait(0.5)
+                        end
+
+                        -- continue main loop
+                        goto continue_loop
                     end
                 end
 
@@ -507,7 +551,7 @@ do
                         end)
                         waitUntilNoEgg(8)
                     else
-                        -- Not allowed: request another spawn and continue
+                        -- Not allowed: try to replace quickly (single quick request) then continue
                         if requestEggRemote then
                             pcall(function()
                                 local args = {
@@ -551,3 +595,4 @@ do
         })
     end
 end
+
